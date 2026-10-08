@@ -5,6 +5,7 @@
 # NOTE: VS ignores from https://github.com/github/gitignore is in vs/.gitignore
 
 # build artifacts
+/.tmp/
 bin
 obj
 

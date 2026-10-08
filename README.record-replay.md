@@ -58,3 +58,17 @@ build compatibility has been proven. Different FPU implementations may fail
 entry checks. Compatibility is a versioned emulation/evidence contract, not
 equality of platform executable files. Existing DRINPUT archives require their
 legacy launcher; this distinct format does not silently reinterpret them.
+
+## Synthetic regression suite
+
+Custom ASM fixtures, codec checks and the standalone test runner are maintained
+in this fork under [tests/native-replay](tests/native-replay/README.md):
+
+```sh
+python3 -B tests/native-replay/run_native_regression.py --binary ./src/dosbox-x
+```
+
+This records each fixture and checks two fresh replays, including relocated
+overlay reuse, input, VGA/x87, speaker, exit and rejection cases. No outer harness
+checkout or game installation is required. All generated artifacts stay in
+`.tmp`; Python and the test-only SDL injector are not runtime dependencies.
