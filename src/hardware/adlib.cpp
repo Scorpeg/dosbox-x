@@ -1820,6 +1820,48 @@ void OPL_ShutDown(Section* sec){
 	module = nullptr;
 }
 
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+#include "agent/audio_capture.h"
+#include "cpu.h"
+namespace dosbox_agent {
+bool AGENT_OplCapture(JsonValue* result, std::string* error) {
+    const auto reject = [error](const char* why) { if (error) *error = why; return false; };
+    if (!module || !module->handler || !module->mixerChan || Adlib::usedoplemu != "fast" ||
+        adlib_pcm_boost_enable || adlib_force_timer_overflow_on_polling || module->esfm_nativemode ||
+        (Adlib::Module::oplmode != OPL_opl2 && Adlib::Module::oplmode != OPL_opl3))
+        return reject("OPL state requires DBOPL fast OPL2/OPL3 without PCM boost or forced timer overflow");
+    const int mode = OplCaptureAccess::mode(*module);
+    if ((mode != Adlib::MODE_OPL2 && mode != Adlib::MODE_OPL3) ||
+        module->mixerChan->handler != OPL_CallBack || !module->mixerChan->name ||
+        std::string(module->mixerChan->name) != "FM") return reject("unknown OPL frontend/channel identity");
+    OplBytes registers, timers, synth, tables, channel;
+    OplCaptureAccess::frontend(*module, registers, timers);
+    if (!module->handler->AgentOplCapture(synth, tables) || !OplMixerBytes(*module->mixerChan, channel) ||
+        !registers.valid || !timers.valid) return reject("unsupported or inconsistent OPL storage representation");
+    auto value = JsonValue::Object(), domains = JsonValue::Object();
+    const auto append = [&domains](const char* name, const OplBytes& bytes) {
+        auto domain = JsonValue::Object();
+        domain.object["bytes"] = JsonValue::Number(std::to_string(bytes.bytes.size()));
+        domain.object["sha256"] = JsonValue::String(AGENT_Sha256Hex(bytes.bytes));
+        domains.object[name] = domain;
+    };
+    append("frontend", registers); append("timers", timers); append("synth", synth);
+    append("tables", tables); append("channel", channel);
+    value.object["contract"] = JsonValue::String("opl-dbopl-state-v1");
+    value.object["mode"] = JsonValue::String(mode == Adlib::MODE_OPL2 ? "opl2" : "opl3");
+    value.object["implementation"] = JsonValue::String("dbopl-fast-tablemul-v1");
+    value.object["channels"] = JsonValue::Number("18"); value.object["operators"] = JsonValue::Number("36");
+    value.object["rate_numerator"] = JsonValue::Number(std::to_string(module->mixerChan->freq_n));
+    value.object["rate_denominator"] = JsonValue::Number(std::to_string(module->mixerChan->freq_d_orig));
+    value.object["whole_audio_qualified"] = JsonValue::Bool(false);
+    value.object["restorable"] = JsonValue::Bool(false);
+    value.object["domains"] = domains;
+    *result = value;
+    return true;
+}
+}
+#endif
+
 // savestate support
 void Adlib::Module::SaveState( std::ostream& stream )
 {

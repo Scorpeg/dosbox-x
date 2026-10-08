@@ -24,6 +24,10 @@
 #include <gtest/gtest.h>
 
 #include "dosbox.h"
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+#include "agent/agent_bridge.h"
+#include "pic.h"
+#endif
 #include "logging.h"
 #include "regs.h"
 #include "control.h"
@@ -2242,6 +2246,12 @@ void SHELL_Run() {
 	SHELL_ProgramStart_First_shell(&first_shell);
 	first_shell->Prepare();
 	prepared = true;
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+    if (!dosbox_agent::AGENT_StartupStartAllowed())
+        LOG_MSG("AGENT shell-prepared clock: ticks=%llu left=%lld cycles=%lld",
+                static_cast<unsigned long long>(PIC_Ticks), static_cast<long long>(CPU_CycleLeft), static_cast<long long>(CPU_Cycles));
+    dosbox_agent::AGENT_StartupBarrier();
+#endif
 	if (section!=NULL&&!control->opt_noconfig&&!control->opt_securemode&&!control->SecureMode()) {
 		char *shell = (char *)section->Get_string("shell");
 		if (strlen(shell)) {

@@ -94,7 +94,7 @@ class AgentClientTests(unittest.TestCase):
                 "\n".join((
                     "transport=named_pipe",
                     r"endpoint=\\.\pipe\client-test",
-                    "dosbox_executable=runtime\\dosbox-x.exe",
+                    "dosbox_executable=runtime/dosbox-x.exe",
                     "dosbox_workdir=runtime",
                     "profile=test",
                     "request_timeout_ms=50",
@@ -117,7 +117,7 @@ class AgentClientTests(unittest.TestCase):
                 "\n".join((
                     "transport=named_pipe",
                     r"endpoint=\\.\pipe\client-test",
-                    "dosbox_executable=runtime\\dosbox-x.exe",
+                    "dosbox_executable=runtime/dosbox-x.exe",
                     "dosbox_workdir=runtime",
                     "request_timeout_ms=50",
                     "max_message_bytes=64",

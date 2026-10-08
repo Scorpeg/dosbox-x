@@ -88,6 +88,9 @@
 #include "support.h"
 #include "shell.h"
 #include "hardopl.h"
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+#include "agent/audio_capture.h"
+#endif
 #include "emu8k.h"
 using namespace std;
 
@@ -3330,6 +3333,55 @@ void SB_INFO::write_sb(Bitu port,Bitu val,Bitu /*iolen*/) {
 }
 
 static SB_INFO sb[MAX_CARDS];
+
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+namespace dosbox_agent {
+JsonValue AGENT_SbPlaybackStorage() {
+    // Capture stored sound fields without device calls; this is not a restorable snapshot.
+    auto number = [](std::uint64_t n) { return JsonValue::Number(std::to_string(n)); };
+    auto result = JsonValue::Object();
+    result.object["contract"] = JsonValue::String("sb-playback-subset-v1");
+    auto cards = JsonValue::Array();
+    for (const auto& card : sb) {
+        auto row = JsonValue::Object();
+        auto n = [&](const char* key, std::uint64_t value) { row.object[key] = number(value); };
+        auto b = [&](const char* key, bool value) { row.object[key] = JsonValue::Bool(value); };
+        n("type", card.type); n("mode", card.mode); n("rate", card.freq);
+        n("base", card.hw.base); n("irq", card.hw.irq);
+        n("dma8", card.hw.dma8); n("dma16", card.hw.dma16);
+        b("speaker", card.speaker); b("irq8_pending", card.irq.pending_8bit);
+        b("irq16_pending", card.irq.pending_16bit);
+        n("dsp_state", card.dsp.state); n("dsp_command", card.dsp.cmd);
+        n("dma_mode", card.dma.mode); n("dma_rate", card.dma.rate);
+        n("dma_total", card.dma.total); n("dma_left", card.dma.left);
+        n("dma_remainder", card.dma.remain_size);
+        b("dma_stereo", card.dma.stereo); b("dma_signed", card.dma.sign);
+        b("dma_autoinit", card.dma.autoinit); b("dma_recording", card.dma.recording);
+        row.object["dma_channel"] = card.dma.chan ? number(card.dma.chan->channum) : JsonValue::Null();
+        cards.array.push_back(row);
+    }
+    result.object["cards"] = cards;
+    auto channels = JsonValue::Array();
+    for (unsigned i = 0; i < 8; ++i) {
+        auto* channel = GetDMAChannel(i);
+        if (!channel) { channels.array.push_back(JsonValue::Null()); continue; }
+        auto row = JsonValue::Object();
+        auto n = [&](const char* key, std::uint64_t value) { row.object[key] = number(value); };
+        auto b = [&](const char* key, bool value) { row.object[key] = JsonValue::Bool(value); };
+        n("number", channel->channum); n("page", channel->pagenum); n("page_base", channel->pagebase);
+        n("base_address", channel->baseaddr); n("address", channel->curraddr);
+        n("base_count", channel->basecnt); n("count", channel->currcnt);
+        n("width16", channel->DMA16); n("transfer_mode", channel->transfer_mode);
+        n("masked_by", channel->masked_by);
+        b("increment", channel->increment); b("autoinit", channel->autoinit);
+        b("masked", channel->masked); b("terminal_count", channel->tcount); b("request", channel->request);
+        channels.array.push_back(row);
+    }
+    result.object["dma_channels"] = channels;
+    return result;
+}
+}
+#endif
 
 static void adlib_gusforward(Bitu /*port*/,Bitu val,Bitu /*iolen*/) {
 	adlib_commandreg=(uint8_t)(val&0xff);

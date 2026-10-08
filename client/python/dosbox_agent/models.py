@@ -41,6 +41,8 @@ class AgentConfig:
     max_memory_read_bytes: int
     max_trace_events: int
     test_profile: bool = False
+    startup_barrier: bool = False
+    initial_rtc_unix_seconds: int | None = None
 
 
 @dataclass(frozen=True)

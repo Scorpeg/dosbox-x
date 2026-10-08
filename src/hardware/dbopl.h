@@ -250,6 +250,9 @@ struct Chip {
 
 struct Handler : public Adlib::Handler {
 	DBOPL::Chip chip;
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+	bool AgentOplCapture(dosbox_agent::OplBytes&, dosbox_agent::OplBytes&) const override;
+#endif
 	uint32_t WriteAddr( uint32_t port, uint8_t val ) override;
 	void WriteReg( uint32_t addr, uint8_t val ) override;
 	void Generate( MixerChannel* chan, Bitu samples ) override;

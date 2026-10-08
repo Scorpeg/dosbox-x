@@ -1,3 +1,4 @@
+#include "config.h"
 #if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
 #include "agent/agent_bridge.h"
 
@@ -17,6 +18,7 @@ public:
         std::uint64_t sequence = 0;
         std::chrono::steady_clock::time_point not_before;
         Command command;
+        bool drain_safe = false;
     };
 
     mutable std::mutex mutex;
@@ -55,12 +57,12 @@ bool EmulationThreadQueue::IsBoundToCurrentThread() const
     return impl->attached && impl->emulation_thread == std::this_thread::get_id();
 }
 
-std::uint64_t EmulationThreadQueue::Submit(Command command)
+std::uint64_t EmulationThreadQueue::Submit(Command command, bool drain_safe)
 {
-    return SubmitAfter(0, std::move(command));
+    return SubmitAfter(0, std::move(command), drain_safe);
 }
 
-std::uint64_t EmulationThreadQueue::SubmitAfter(const std::uint32_t delay_ms, Command command)
+std::uint64_t EmulationThreadQueue::SubmitAfter(const std::uint32_t delay_ms, Command command, bool drain_safe)
 {
     if (!command)
         return 0;
@@ -74,11 +76,12 @@ std::uint64_t EmulationThreadQueue::SubmitAfter(const std::uint32_t delay_ms, Co
     pending.sequence = sequence;
     pending.not_before = std::chrono::steady_clock::now() + std::chrono::milliseconds(delay_ms);
     pending.command = std::move(command);
+    pending.drain_safe = drain_safe;
     impl->commands.push_back(std::move(pending));
     return sequence;
 }
 
-std::size_t EmulationThreadQueue::Pump()
+std::size_t EmulationThreadQueue::Pump(bool drain_only)
 {
     if (!IsBoundToCurrentThread())
         return 0;
@@ -100,7 +103,7 @@ std::size_t EmulationThreadQueue::Pump()
             pending = std::move(impl->commands.front());
             impl->commands.pop_front();
             ++inspected;
-            if (pending.not_before > std::chrono::steady_clock::now()) {
+            if ((drain_only && !pending.drain_safe) || pending.not_before > std::chrono::steady_clock::now()) {
                 impl->commands.push_back(std::move(pending));
                 continue;
             }
@@ -130,6 +133,9 @@ namespace {
 
 std::mutex debugger_stop_listener_mutex;
 DebuggerStopListener debugger_stop_listener;
+std::atomic<bool> startup_hold{false};
+std::atomic<bool> startup_entered{false};
+std::atomic<std::int64_t> initial_rtc{-1};
 
 } // namespace
 
@@ -145,8 +151,25 @@ std::size_t AGENT_BridgePump()
 
 void AGENT_BridgeShutdown()
 {
+    AGENT_ReleaseStartupBarrier();
     AGENT_EmulationQueue().Shutdown();
     AGENT_SetDebuggerStopListener(DebuggerStopListener());
+}
+
+void AGENT_ArmStartupBarrier() { startup_entered = false; startup_hold = true; }
+void AGENT_SetInitialRtc(std::int64_t epoch) { initial_rtc = epoch; }
+std::int64_t AGENT_InitialRtc() { return initial_rtc; }
+bool AGENT_StartupStartAllowed() { return !startup_hold || startup_entered; }
+void AGENT_ReleaseStartupBarrier() { startup_hold = false; }
+void AGENT_StartupBarrier()
+{
+    if (!startup_hold) return;
+    startup_entered = true;
+    while (startup_hold) {
+        // Service RPCs without advancing the guest or PIC.
+        AGENT_BridgePump();
+        if (startup_hold) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
 }
 
 void AGENT_SetDebuggerStopListener(DebuggerStopListener listener)

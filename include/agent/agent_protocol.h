@@ -25,6 +25,8 @@ struct AgentConfig {
     std::size_t max_memory_read_bytes = 0;
     std::size_t max_trace_events = 0;
     bool test_profile = false;
+    bool startup_barrier = false;
+    std::int64_t initial_rtc_unix_seconds = -1;
 };
 
 enum class JsonType {

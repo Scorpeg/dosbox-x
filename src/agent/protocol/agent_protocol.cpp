@@ -1,3 +1,4 @@
+#include "config.h"
 #if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
 #include "agent/agent_protocol.h"
 
@@ -505,7 +506,7 @@ bool AGENT_LoadConfigFile(const std::string& path,
         "max_trace_events"
     };
     const char* const optional_keys[] = {
-        "profile"
+        "profile", "startup_barrier", "initial_rtc_unix_seconds"
     };
 
     std::map<std::string, std::string> values;
@@ -575,6 +576,13 @@ bool AGENT_LoadConfigFile(const std::string& path,
     }
 
     parsed.endpoint = values["endpoint"];
+    if (values.count("startup_barrier")) {
+        if (values["startup_barrier"] != "true" && values["startup_barrier"] != "false") {
+            *error = "startup_barrier must be true or false";
+            return false;
+        }
+        parsed.startup_barrier = values["startup_barrier"] == "true";
+    }
     const std::string profile = values.find("profile") == values.end() ?
             "production" : values["profile"];
     if (profile == "production")
@@ -601,6 +609,13 @@ bool AGENT_LoadConfigFile(const std::string& path,
                                 : JoinPath(config_directory, values["dosbox_workdir"]);
 
     std::uint64_t number = 0;
+    if (values.count("initial_rtc_unix_seconds")) {
+        if (!ParseUnsigned(values["initial_rtc_unix_seconds"], 2147483647, &number)) {
+            *error = "Invalid initial_rtc_unix_seconds";
+            return false;
+        }
+        parsed.initial_rtc_unix_seconds = static_cast<std::int64_t>(number);
+    }
     if (!ParseUnsigned(values["request_timeout_ms"], UINT_MAX, &number)) {
         *error = "Invalid request_timeout_ms";
         return false;
@@ -653,6 +668,8 @@ std::string AGENT_FormatStartupLog(const AgentConfig& config)
         << ",\"max_message_bytes\":" << config.max_message_bytes
         << ",\"max_memory_read_bytes\":" << config.max_memory_read_bytes
         << ",\"max_trace_events\":" << config.max_trace_events
+        << ",\"startup_barrier\":" << (config.startup_barrier ? "true" : "false")
+        << ",\"initial_rtc_unix_seconds\":" << (config.initial_rtc_unix_seconds < 0 ? "null" : std::to_string(config.initial_rtc_unix_seconds))
         << "}";
     return log.str();
 }

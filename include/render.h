@@ -186,6 +186,8 @@ extern Render_ttf ttf;
 extern Render_t render;
 extern Bitu last_gfx_flags;
 extern ScalerLineHandler_t RENDER_DrawLine;
+// Capture before host scaling/cache dispatch.
+void RENDER_SubmitLine(const void* source);
 void RENDER_SetSize(Bitu width,Bitu height,Bitu bpp,float fps,double scrn_ratio);
 bool RENDER_StartUpdate(void);
 void RENDER_EndUpdate(bool abort);

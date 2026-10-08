@@ -24,6 +24,9 @@
 #include "fpu.h"
 #include "paging.h"
 #include "mmx.h"
+#if C_DEBUG && defined(C_DOSBOX_AGENT)
+#include "agent/state_capture.h"
+#endif
 
 extern bool do_lds_wraparound;
 
@@ -57,6 +60,9 @@ extern bool ignore_opcode_63;
 
 #include "lock.h"
 static INLINE uint8_t LockPrefixRead(PhysPt address) {
+#if C_DEBUG && defined(C_DOSBOX_AGENT)
+    dosbox_agent::MemoryFetchScope fetch;
+#endif
 	return mem_readb_inline(address);
 }
 
@@ -130,22 +136,34 @@ static INLINE void FetchDiscardb() {
 }
 
 static INLINE uint8_t FetchPeekb() {
+#if C_DEBUG && defined(C_DOSBOX_AGENT)
+    dosbox_agent::MemoryFetchScope fetch;
+#endif
 	uint8_t temp=LoadMb(core.cseip);
 	return temp;
 }
 
 static INLINE uint8_t Fetchb() {
+#if C_DEBUG && defined(C_DOSBOX_AGENT)
+    dosbox_agent::MemoryFetchScope fetch;
+#endif
 	uint8_t temp=LoadMb(core.cseip);
 	core.cseip+=1;
 	return temp;
 }
 
 static INLINE uint16_t Fetchw() {
+#if C_DEBUG && defined(C_DOSBOX_AGENT)
+    dosbox_agent::MemoryFetchScope fetch;
+#endif
 	uint16_t temp=LoadMw(core.cseip);
 	core.cseip+=2;
 	return temp;
 }
 static INLINE uint32_t Fetchd() {
+#if C_DEBUG && defined(C_DOSBOX_AGENT)
+    dosbox_agent::MemoryFetchScope fetch;
+#endif
 	uint32_t temp=LoadMd(core.cseip);
 	core.cseip+=4;
 	return temp;
@@ -177,6 +195,14 @@ Bits CPU_Core_Normal_Run(void) {
 		BaseDS=SegBase(ds);
 		BaseSS=SegBase(ss);
 		core.base_val_ds=ds;
+#if C_DEBUG && defined(C_DOSBOX_AGENT)
+        if (dosbox_agent::AGENT_ModuleEventsEnabled)
+            dosbox_agent::AGENT_ModuleEventsObserve();
+        if (dosbox_agent::AGENT_InstructionWindowEnabled)
+            dosbox_agent::AGENT_InstructionWindowObserve();
+        dosbox_agent::MemoryInstructionScope memory_instruction(dosbox_agent::AGENT_MemoryCurrentFrame(),
+                SegValue(cs), reg_eip, !cpu.pmode ? 0 : (reg_flags & FLAG_VM) ? 2 : 1);
+#endif
 #if C_DEBUG
 #if C_HEAVY_DEBUG
 		if (DEBUG_HeavyIsBreakpoint()) {

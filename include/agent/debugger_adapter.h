@@ -7,6 +7,9 @@
 
 namespace dosbox_agent {
 
+struct JsonValue;
+struct VideoSnapshot;
+
 enum class MemorySpace {
     Segmented,
     Linear,
@@ -81,10 +84,13 @@ public:
     bool IsReadyForTargetStart() const;
     std::uint64_t EntryBreakpointSequence() const;
     bool Continue(std::string* error) const;
+    bool ReplayBoundaryHeld() const;
+    bool ReplayExitHeld() const;
     bool Pause(std::string* error) const;
     bool StartTargetAtEntry(const std::string& command,
                             const std::vector<std::string>& arguments,
                             const std::string& workdir,
+                            const std::string& dos_directory,
                             std::string* error) const;
     bool GetRegisters(RegisterSnapshot* registers, std::string* error) const;
     bool Step(StepMode mode, bool* continued, std::string* error) const;
@@ -114,6 +120,9 @@ public:
     bool StopTrace(std::size_t* event_count, std::string* error) const;
     bool IsTraceComplete() const;
     bool TerminateTarget(std::string* error) const;
+    bool ReplayCommand(const JsonValue& params, JsonValue* result, std::string* error) const;
+    bool CaptureVideo(VideoSnapshot* result, std::string* error) const;
+    bool CheckpointCommand(const JsonValue& params, JsonValue* result, std::string* error) const;
 };
 
 } // namespace dosbox_agent

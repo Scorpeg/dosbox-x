@@ -42,6 +42,9 @@
 #include "setup.h"
 #include "control.h"
 #include "SDL.h"
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+#include "agent/replay_timeline.h"
+#endif
 
 #if defined(_MSC_VER)
 # pragma warning(disable:4244) /* const fmath::local::uint64_t to double possible loss of data */
@@ -80,6 +83,13 @@ void AUX_INT33_Takeover();
 int KEYBOARD_AUX_Active();
 void KEYBOARD_AUX_Event(float x,float y,Bitu buttons,int scrollwheel);
 extern bool MOUSE_IsLocked();
+static bool Mouse_GuestCaptured() {
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+    return dosbox_agent::AGENT_ReplayMouseCaptured(MOUSE_IsLocked());
+#else
+    return MOUSE_IsLocked();
+#endif
+}
 extern bool usesystemcursor, dbcs_sbcs, showdbcs, del_flag;
 
 bool en_int33=false;
@@ -710,7 +720,7 @@ void PC98_ChangeMouseFunction(bool nec)
 
 void DrawCursor() {
     if (mouse.hidden || mouse.inhibit_draw) return;
-    if (usesystemcursor&&!MOUSE_IsLocked()) {
+    if (usesystemcursor&&!Mouse_GuestCaptured()) {
         SDL_ShowCursor(SDL_ENABLE);
         return;
     }
@@ -851,7 +861,23 @@ bool IsDebuggerActive(void);
 #endif
 
 /* FIXME: Re-test this code */
+MouseMotionContext Mouse_GetMotionContext() {
+    extern MOUSE_EMULATION user_cursor_emulation;
+    bool emulated = false;
+    switch (user_cursor_emulation) {
+    case MOUSE_EMULATION_ALWAYS: emulated = true; break;
+    case MOUSE_EMULATION_INTEGRATION: emulated = !user_cursor_locked && !GFX_IsFullscreen(); break;
+    case MOUSE_EMULATION_LOCKED: emulated = user_cursor_locked && !GFX_IsFullscreen(); break;
+    default: break;
+    }
+    return {user_cursor_locked, emulated, user_cursor_x, user_cursor_y, user_cursor_sw, user_cursor_sh};
+}
+
 void Mouse_CursorMoved(float xrel,float yrel,float x,float y,bool emulate) {
+    Mouse_CursorMovedContext(xrel, yrel, x, y, emulate, Mouse_GetMotionContext());
+}
+
+void Mouse_CursorMovedContext(float xrel,float yrel,float x,float y,bool emulate, const MouseMotionContext& context) {
     extern bool Mouse_Vertical;
     float dx = xrel * mouse.pixelPerMickey_x;
     float dy = (Mouse_Vertical?-yrel:yrel) * mouse.pixelPerMickey_y;
@@ -871,7 +897,7 @@ void Mouse_CursorMoved(float xrel,float yrel,float x,float y,bool emulate) {
     if((fabs(xrel) > 1.0) || (mouse.senv_x < 1.0)) dx *= mouse.senv_x;
     if((fabs(yrel) > 1.0) || (mouse.senv_y < 1.0)) dy *= mouse.senv_y;
 
-    if (user_cursor_locked) {
+    if (context.locked) {
         /* either device reports relative motion ONLY, and therefore requires that the user
          * has captured the mouse */
 
@@ -926,27 +952,10 @@ void Mouse_CursorMoved(float xrel,float yrel,float x,float y,bool emulate) {
     if (mouse.y < mouse.min_y) mouse.y = mouse.min_y;
 
     /*make mouse emulated, eventually*/
-    extern MOUSE_EMULATION user_cursor_emulation;
-    bool emu;
-    switch (user_cursor_emulation)
+    if (!context.driver_emulated)
     {
-    case MOUSE_EMULATION_ALWAYS:
-        emu = true;
-        break;
-    case MOUSE_EMULATION_INTEGRATION:
-        emu = !user_cursor_locked && !GFX_IsFullscreen();
-        break;
-    case MOUSE_EMULATION_LOCKED:
-        emu = user_cursor_locked && !GFX_IsFullscreen();
-        break;
-    case MOUSE_EMULATION_NEVER:
-    default:
-        emu = false;
-    }
-    if (!emu)
-    {
-        auto x1 = (double)user_cursor_x / ((double)user_cursor_sw - 1);
-        auto y1 = (double)user_cursor_y / ((double)user_cursor_sh - 1);
+        auto x1 = (double)context.x / ((double)context.width - 1);
+        auto y1 = (double)context.y / ((double)context.height - 1);
         mouse.x       = x1 * mouse.max_screen_x;
         mouse.y       = y1 * mouse.max_screen_y;
 
@@ -988,6 +997,104 @@ void Mouse_CursorMoved(float xrel,float yrel,float x,float y,bool emulate) {
 
 uint8_t Mouse_GetButtonState(void) {
     return mouse.buttons;
+}
+
+unsigned Mouse_EventQueueSize() { return mouse.events; }
+
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+#include "agent/replay_timeline.h"
+#include "agent/state_capture.h"
+#include "agent/exec_observer.h"
+#include <cstring>
+#include <sstream>
+#include <locale>
+bool dosbox_agent::AGENT_MouseStorage(JsonValue* result, std::string* error) {
+    if (!en_int33 || en_vmware || KEYBOARD_AUX_Active()) {
+        if (error) *error = "mouse storage contract requires INT33 without AUX or VMware";
+        return false;
+    }
+    JsonValue storage = JsonValue::Object();
+    storage.object["integers"] = JsonValue::Object();
+    storage.object["float32_bits"] = JsonValue::Object();
+    storage.object["arrays"] = JsonValue::Object();
+    auto& integers = storage.object["integers"].object;
+    auto& floats = storage.object["float32_bits"].object;
+    auto& arrays = storage.object["arrays"].object;
+#define I(field) integers[#field] = JsonValue::Number(std::to_string(mouse.field))
+    I(buttons); I(wheel); I(last_scrolled_x); I(last_scrolled_y); I(hidden);
+    I(min_x); I(max_x); I(min_y); I(max_y); I(max_screen_x); I(max_screen_y); I(mickey_x); I(mickey_y);
+    I(events); I(sub_seg); I(sub_ofs); I(sub_mask); I(background); I(backposx); I(backposy);
+    I(clipx); I(clipy); I(hotx); I(hoty); I(textAndMask); I(textXorMask);
+    I(senv_x_val); I(senv_y_val); I(dspeed_val); I(doubleSpeedThreshold); I(language); I(cursorType); I(oldhidden);
+    I(page); I(enabled); I(inhibit_draw); I(timer_in_progress); I(first_range_setx); I(first_range_sety);
+    I(in_UIR); I(polled); I(mode); I(gran_x); I(gran_y); I(scrollwheel);
+    I(ps2_type); I(ps2_rate); I(ps2_packet_size); I(ps2_unlock_idx);
+#undef I
+#define F(field) { uint32_t bits; static_assert(sizeof(mouse.field) == sizeof(bits), "binary32 required"); \
+    std::memcpy(&bits, &mouse.field, sizeof(bits)); floats[#field] = JsonValue::Number(std::to_string(bits)); }
+    F(add_x); F(add_y); F(mickey_accum_x); F(mickey_accum_y); F(x); F(y); F(ps2x); F(ps2y);
+    F(mickeysPerPixel_x); F(mickeysPerPixel_y); F(pixelPerMickey_x); F(pixelPerMickey_y); F(senv_x); F(senv_y);
+#undef F
+    // Hexfloat preserves PIC long-double values without binary64 rounding or ABI padding.
+    std::ostringstream hidden_at;
+    hidden_at.imbue(std::locale::classic());
+    hidden_at << std::hexfloat << mouse.hidden_at;
+    storage.object["hidden_at_hex"] = JsonValue::String(hidden_at.str());
+#define A(name, data) { JsonValue a = JsonValue::Array(); for (auto value : data) a.array.push_back(JsonValue::Number(std::to_string(value))); arrays[name] = a; }
+    A("times_pressed", mouse.times_pressed); A("times_released", mouse.times_released);
+    A("last_pressed_x", mouse.last_pressed_x); A("last_pressed_y", mouse.last_pressed_y);
+    A("last_released_x", mouse.last_released_x); A("last_released_y", mouse.last_released_y);
+    A("updateRegion_x", mouse.updateRegion_x); A("updateRegion_y", mouse.updateRegion_y);
+    A("defaultScreenMask", defaultScreenMask); A("defaultCursorMask", defaultCursorMask);
+    A("defaultCursorMaskNEC", defaultCursorMaskNEC);
+    A("userdefScreenMask", userdefScreenMask); A("userdefCursorMask", userdefCursorMask);
+#undef A
+    arrays["queue"] = JsonValue::Array();
+    for (const auto& event : mouse.event_queue) {
+        arrays["queue"].array.push_back(JsonValue::Number(std::to_string(event.type)));
+        arrays["queue"].array.push_back(JsonValue::Number(std::to_string(event.buttons)));
+    }
+    const char* screen = mouse.screenMask == defaultScreenMask ? "default" : mouse.screenMask == userdefScreenMask ? "user" : nullptr;
+    const char* cursor = mouse.cursorMask == defaultCursorMask ? "default" : mouse.cursorMask == userdefCursorMask ? "user" :
+                         mouse.cursorMask == defaultCursorMaskNEC ? "nec-default" : nullptr;
+    if (!screen || !cursor) { if (error) *error = "unknown mouse cursor mask backing"; return false; }
+    storage.object["screen_mask"] = JsonValue::String(screen);
+    storage.object["cursor_mask"] = JsonValue::String(cursor);
+    storage.object["background_sha256"] = JsonValue::String(AGENT_Sha256Hex(std::vector<uint8_t>(mouse.backData, mouse.backData + sizeof(mouse.backData))));
+    *result = storage;
+    return true;
+}
+#endif
+void Mouse_HostMotion(float xrel, float yrel, float x, float y, bool emulate) {
+    const auto context = Mouse_GetMotionContext();
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+    dosbox_agent::ReplayKey event;
+    event.kind = 1;
+    static_assert(sizeof(float) == 4, "replay motion requires binary32");
+    const float values[] = {xrel, yrel, x, y};
+    std::memcpy(event.motion, values, sizeof(values));
+    event.context[0] = context.x; event.context[1] = context.y;
+    event.context[2] = context.width; event.context[3] = context.height;
+    event.mouse_flags = (emulate ? 1u : 0u) | (context.locked ? 2u : 0u) | (context.driver_emulated ? 4u : 0u);
+    if (dosbox_agent::AGENT_ReplayHostMouse(event)) return;
+#endif
+    Mouse_CursorMovedContext(xrel, yrel, x, y, emulate, context);
+}
+void Mouse_HostButton(uint8_t button, bool pressed) {
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+    dosbox_agent::ReplayKey event;
+    event.kind = 2; event.button = button; event.pressed = pressed;
+    if (dosbox_agent::AGENT_ReplayHostMouse(event)) return;
+#endif
+    if (pressed) Mouse_ButtonPressed(button); else Mouse_ButtonReleased(button);
+}
+void Mouse_HostWheel(int32_t scroll) {
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+    dosbox_agent::ReplayKey event;
+    event.kind = 3; event.wheel = scroll;
+    if (dosbox_agent::AGENT_ReplayHostMouse(event)) return;
+#endif
+    Mouse_WheelMoved(scroll);
 }
 
 char text[5000];
@@ -1584,7 +1691,7 @@ void Mouse_Used(void) {
 }
 
 void Mouse_Read_Motion_Data() {
-    const auto locked = MOUSE_IsLocked();
+    const auto locked = Mouse_GuestCaptured();
     reg_cx = (uint16_t)static_cast<int16_t>(locked ? mouse.mickey_x : 0);
     reg_dx = (uint16_t)static_cast<int16_t>(locked ? mouse.mickey_y : 0);
     mouse.mickey_x = 0;
@@ -1613,7 +1720,7 @@ static Bitu INT33_Handler(void) {
             else RestoreCursorBackgroundText();
             if (mouse.hidden == 0) mouse.hidden_at = PIC_FullIndex();
             mouse.hidden++;
-            if (usesystemcursor&&!MOUSE_IsLocked()) SDL_ShowCursor(SDL_DISABLE);
+            if (usesystemcursor&&!Mouse_GuestCaptured()) SDL_ShowCursor(SDL_DISABLE);
         }
         break;
     case 0x03:  /* MS MOUSE v1.0+ - RETURN POSITION AND BUTTON STATUS */
@@ -2275,7 +2382,7 @@ static Bitu INT74_Handler(void) {
         /* Check for an active Interrupt Handler that will get called */
         if (AllowINT33RMAccess() && (mouse.sub_mask & mouse.event_queue[mouse.events].type)) {
             reg_ax=mouse.event_queue[mouse.events].type
-                  | (!MOUSE_IsLocked() ? MOUSE_ABSOLUTE & mouse.sub_mask : 0);
+                  | (!Mouse_GuestCaptured() ? MOUSE_ABSOLUTE & mouse.sub_mask : 0);
             reg_bl=mouse.event_queue[mouse.events].buttons;
             reg_bh=GetWheel8bit(); /* CuteMouse wheel extension */
             reg_cx=(uint16_t)POS_X;
@@ -2650,11 +2757,11 @@ static inline void CmdAbsPointerCommand() {
                 break;
         case ABSPOINTER_RELATIVE:
                 vmware_mouse = false;
-                if (!MOUSE_IsLocked()) SDL_ShowCursor(SDL_ENABLE);
+                if (!Mouse_GuestCaptured()) SDL_ShowCursor(SDL_ENABLE);
                 break;
         case ABSPOINTER_ABSOLUTE:
                 vmware_mouse = true;
-                if (!MOUSE_IsLocked()) SDL_ShowCursor(SDL_DISABLE);
+                if (!Mouse_GuestCaptured()) SDL_ShowCursor(SDL_DISABLE);
                 break;
         default:
                 LOG_MSG("VMWARE: unknown mouse subcommand 0x%08x", reg_ebx);

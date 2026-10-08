@@ -33,6 +33,9 @@
 #include "cpu.h"
 #include "menu.h"
 #include "crc32.h"
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+#include "agent/exec_observer.h"
+#endif
 #if defined(OSFREE)
 #include "exepack.h"
 #include "exepackv1.h"
@@ -115,6 +118,9 @@ void DOS_Terminate(uint16_t pspseg,bool tsr,uint8_t exitcode) {
 	
 	DOS_PSP curpsp(pspseg);
 	if (pspseg==curpsp.GetParent()) return;
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+    dosbox_agent::ExecExitObservation exit_observation(pspseg, curpsp.GetParent(), tsr, exitcode);
+#endif
 	/* the UTF-8 modes of the AMIS providers end with the process */
 	DOS_UTF8_ProcessEnded(pspseg);
 	DOS_UTF8Names_ProcessEnded(pspseg);
@@ -297,6 +303,9 @@ static void SetupCMDLine(uint16_t pspseg, const DOS_ParamBlock& block) {
  *        an error code so that the INT 21h EXEC call can print an informative
  *        error message! --J.C. */
 bool DOS_Execute(const char* name, PhysPt block_pt, uint16_t flags) {
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+    dosbox_agent::ExecObservation exec_observation(name, flags, block_pt);
+#endif
 	EXE_Header head;Bitu i;
 	uint16_t fhandle;uint16_t len;uint32_t pos;
 	uint16_t pspseg;
@@ -345,6 +354,9 @@ bool DOS_Execute(const char* name, PhysPt block_pt, uint16_t flags) {
 	//Remove the loadhigh flag for the moment!
 	if(flags&0x80) LOG(LOG_EXEC,LOG_ERROR)("using loadhigh flag!!!!!. dropping it");
 	flags &= 0x7f;
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+    exec_observation.Mode(flags);
+#endif
 	if (flags!=LOADNGO && flags!=OVERLAY && flags!=LOAD) {
 		DOS_SetError(DOSERR_FORMAT_INVALID);
 		return false;
@@ -369,10 +381,18 @@ bool DOS_Execute(const char* name, PhysPt block_pt, uint16_t flags) {
 		}
 	}
 	len=sizeof(EXE_Header);
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+    exec_observation.Opened(fhandle);
+#endif
 	if (!DOS_ReadFile(fhandle,(uint8_t *)&head,&len)) {
 		DOS_CloseFile(fhandle);
 		return false;
 	}
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+    exec_observation.Header(reinterpret_cast<const uint8_t*>(&head), len,
+                            len < sizeof(EXE_Header) || (host_readw(reinterpret_cast<HostPt>(&head)) != MAGIC1 &&
+                                                        host_readw(reinterpret_cast<HostPt>(&head)) != MAGIC2));
+#endif
 	if (len<sizeof(EXE_Header)) {
 		if (len==0) {
 			/* Prevent executing zero byte files */
@@ -481,6 +501,10 @@ bool DOS_Execute(const char* name, PhysPt block_pt, uint16_t flags) {
 		}
 	}
 	/* Load the executable */
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+    exec_observation.Image(loadseg, flags == OVERLAY ? 0 : pspseg, envseg, headersize,
+                           iscom ? 0 : head.relocations, flags == OVERLAY ? block.overlay.relocation : loadseg);
+#endif
 	loadaddress=PhysMake(loadseg,0);
 	RunningProgramLoadAddress = loadaddress;
 	if (iscom) {	/* COM Load 64k - 256 bytes max */
@@ -492,7 +516,12 @@ bool DOS_Execute(const char* name, PhysPt block_pt, uint16_t flags) {
 		if (pos > (unsigned int)(memsize*0x10)) E_Exit("DOS:Not enough memory for COM executable");
 
 		pos=0;DOS_SeekFile(fhandle,&pos,DOS_SEEK_SET);	
-		DOS_ReadFile(fhandle,loadbuf,&readsize);
+		const bool payload_read_ok = DOS_ReadFile(fhandle,loadbuf,&readsize);
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+        exec_observation.Payload(loadbuf, readsize, payload_read_ok);
+#else
+        (void)payload_read_ok;
+#endif
 		checksum = crc32(checksum, loadbuf, readsize);
 		checksum_bytes += readsize;
 		MEM_BlockWrite(loadaddress,loadbuf,readsize);
@@ -500,7 +529,13 @@ bool DOS_Execute(const char* name, PhysPt block_pt, uint16_t flags) {
 		if (imagesize > (unsigned int)(memsize*0x10)) E_Exit("DOS:Not enough memory for EXE image");
 		pos=headersize;DOS_SeekFile(fhandle,&pos,DOS_SEEK_SET);	
 		while (imagesize>0x7FFF) {
-			readsize=0x8000;DOS_ReadFile(fhandle,loadbuf,&readsize);
+			readsize=0x8000;
+            const bool payload_read_ok = DOS_ReadFile(fhandle,loadbuf,&readsize);
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+            exec_observation.Payload(loadbuf, readsize, payload_read_ok);
+#else
+            (void)payload_read_ok;
+#endif
 			checksum = crc32(checksum, loadbuf, readsize);
 			checksum_bytes += readsize;
 			MEM_BlockWrite(loadaddress,loadbuf,readsize);
@@ -508,7 +543,13 @@ bool DOS_Execute(const char* name, PhysPt block_pt, uint16_t flags) {
 			loadaddress+=0x8000;imagesize-=0x8000;
 		}
 		if (imagesize>0) {
-			readsize=(uint16_t)imagesize;DOS_ReadFile(fhandle,loadbuf,&readsize);
+			readsize=(uint16_t)imagesize;
+            const bool payload_read_ok = DOS_ReadFile(fhandle,loadbuf,&readsize);
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+            exec_observation.Payload(loadbuf, readsize, payload_read_ok);
+#else
+            (void)payload_read_ok;
+#endif
 			checksum = crc32(checksum, loadbuf, readsize);
 			checksum_bytes += readsize;
 			MEM_BlockWrite(loadaddress,loadbuf,readsize);
@@ -520,7 +561,13 @@ bool DOS_Execute(const char* name, PhysPt block_pt, uint16_t flags) {
 		else relocate=loadseg;
 		pos=head.reloctable;DOS_SeekFile(fhandle,&pos,0);
 		for (i=0;i<head.relocations;i++) {
-			readsize=4;DOS_ReadFile(fhandle,(uint8_t *)&relocpt,&readsize);
+			readsize=4;
+            const bool relocation_read_ok = DOS_ReadFile(fhandle,(uint8_t *)&relocpt,&readsize);
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+            exec_observation.Relocation(reinterpret_cast<const uint8_t*>(&relocpt), readsize, relocation_read_ok);
+#else
+            (void)relocation_read_ok;
+#endif
 			relocpt=host_readd((HostPt)&relocpt);		//Endianize
 			PhysPt address=PhysMake(RealSeg(relocpt)+loadseg,RealOff(relocpt));
 			mem_writew(address,mem_readw(address)+relocate);
@@ -833,6 +880,9 @@ bool DOS_Execute(const char* name, PhysPt block_pt, uint16_t flags) {
 	if(flags == OVERLAY) {
 		reg_ax = 0;             // Testing with MS-DOS (6.22) shows that if INT 21 AX=4B is called with the overlay flag (AL==3), then AX and DX are 0 on return.
 		reg_dx = 0;
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+        exec_observation.Success(0, false);
+#endif
 		return true;			/* Everything done for overlays */
 	}
 	RealPt csip,sssp;
@@ -941,6 +991,9 @@ bool DOS_Execute(const char* name, PhysPt block_pt, uint16_t flags) {
 		reg_ax=RealOff(csip);
 		reg_bx=memsize;
 		reg_dx=0;
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+        exec_observation.Success(csip, true);
+#endif
 		return true;
 	}
 
@@ -968,6 +1021,9 @@ bool DOS_Execute(const char* name, PhysPt block_pt, uint16_t flags) {
 #if C_DEBUG		
 		/* Started from debug.com, then set breakpoint at start */
 		DEBUG_CheckExecuteBreakpoint(RealSeg(csip),RealOff(csip));
+#endif
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+        exec_observation.Success(csip, true);
 #endif
 		return true;
 	}

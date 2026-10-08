@@ -368,6 +368,42 @@ void SaveState::registerComponent(const std::string& uniqueName, Component& comp
 	components.insert(std::make_pair(uniqueName, CompData(comp)));
 }
 
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+bool SaveState::captureAgentImage(AgentImage* image, std::string* error) {
+    AgentImage captured;
+    size_t total = 0;
+    for (auto& entry : components) {
+        std::ostringstream stream(std::ios::out | std::ios::binary);
+        entry.second.comp.getBytes(stream);
+        if (!stream) { *error = "component capture failed: " + entry.first; return false; }
+        captured[entry.first] = stream.str();
+        total += captured[entry.first].size();
+        if (total > 128u * 1024u * 1024u) { *error = "checkpoint exceeds 128 MiB limit"; return false; }
+    }
+    *image = std::move(captured);
+    return true;
+}
+
+bool SaveState::restoreAgentImage(const AgentImage& image, std::string* error) {
+    if (image.size() != components.size()) { *error = "checkpoint component set changed"; return false; }
+    for (const auto& entry : components)
+        if (!image.count(entry.first)) { *error = "checkpoint component missing: " + entry.first; return false; }
+    const auto restore = [&](const std::string& name) {
+        std::istringstream stream(image.at(name), std::ios::in | std::ios::binary);
+        components.at(name).comp.setBytes(stream);
+        if (!stream || stream.peek() != std::char_traits<char>::eof()) {
+            *error = "checkpoint component restore failed: " + name;
+            return false;
+        }
+        return true;
+    };
+    // Restore scheduler and CPU last because device loaders can change both.
+    for (const auto& entry : components)
+        if (entry.first != "Pic" && entry.first != "CPU" && !restore(entry.first)) return false;
+    return restore("Pic") && restore("CPU");
+}
+#endif
+
 #define CASESENSITIVITY (0)
 #define MAXFILENAME (256)
 

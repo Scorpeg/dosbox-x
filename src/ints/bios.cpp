@@ -55,6 +55,9 @@ extern bool PS1AudioCard;
 #include <time.h>
 #include <sys/stat.h>
 #include "version_string.h"
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+#include "agent/callback_observer.h"
+#endif
 
 #define DOSBOX_INCLUDE
 #include "iglib.h"
@@ -6668,6 +6671,42 @@ static Bitu INT8_Handler(void) {
 static Bitu INT1C_Handler(void) {
     return CBRET_NONE;
 }
+
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+namespace dosbox_agent {
+const char* AGENT_BiosCallbackIdentity(CallBack_Handler handler, bool context) {
+    if (handler == &INT1C_Handler) return "bios-int1c-noop-v1";
+    return context && handler == &INT8_Handler ? "bios-irq0-timer-v1" : nullptr;
+}
+JsonValue AGENT_BiosCallbackContext(CallBack_Handler handler) {
+    if (handler != &INT8_Handler) return JsonValue::Null();
+    JsonValue result = JsonValue::Object();
+    auto& out = result.object;
+    out["contract"] = JsonValue::String("bios-irq0-context-v1");
+    out["led_sync_enabled"] = JsonValue::Bool(enable_bios_timer_synchronize_keyboard_leds);
+    out["sync_time"] = JsonValue::Bool(sync_time);
+    out["cmos_sync_flag"] = JsonValue::Bool(cmos_sync_flag);
+    out["cmos_sync_sec"] = JsonValue::Number(std::to_string(cmos_sync_sec));
+    out["cmos_sync_min"] = JsonValue::Number(std::to_string(cmos_sync_min));
+    out["cmos_sync_hour"] = JsonValue::Number(std::to_string(cmos_sync_hour));
+    out["bootdrive"] = JsonValue::Number(std::to_string(bootdrive));
+    out["ega_vga_arch"] = JsonValue::Bool(IS_EGAVGA_ARCH);
+    out["dosv_enabled"] = JsonValue::Bool(IS_DOSV);
+    out["j3100_enabled"] = JsonValue::Bool(IS_J3100);
+    out["dos_kernel_disabled"] = JsonValue::Bool(dos_kernel_disabled);
+    // IS_DOS_CJK and J3_IsJapanese() read guest memory; capture their raw inputs instead.
+    out["dbcs_table"] = JsonValue::Number(std::to_string(dos.tables.dbcs));
+#if defined(OSFREE)
+    out["osfree"] = JsonValue::Bool(true);
+#else
+    out["osfree"] = JsonValue::Bool(false);
+#endif
+    out["bda"] = AGENT_CallbackBacking(0x400, 256);
+    out["dbcs"] = AGENT_CallbackBacking(std::uint64_t(Real2Phys(dos.tables.dbcs)) + 2, 2);
+    return result;
+}
+}
+#endif
 
 static Bitu INT12_Handler(void) {
     reg_ax=mem_readw(BIOS_MEMORY_SIZE);

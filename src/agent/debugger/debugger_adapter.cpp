@@ -1,7 +1,13 @@
+#include "config.h"
 #if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
 #include "dosbox.h"
 #include "agent/debugger_adapter.h"
 #include "agent/agent_bridge.h"
+#include "agent/replay_timeline.h"
+#include "agent/video_snapshot.h"
+#include "agent/checkpoint.h"
+#include "agent/exec_observer.h"
+#include "agent/launch_directory.h"
 
 #if C_DEBUG
 #include "cpu.h"
@@ -30,6 +36,13 @@ bool RequireEmulationThread(std::string* error)
         return true;
     if (error != NULL)
         *error = "Debugger access was not dispatched on the emulation thread";
+    return false;
+}
+
+bool RequireOutsideReplayBoundary(std::string* error)
+{
+    if (!AGENT_ReplayBoundaryHeld()) return true;
+    if (error) *error = "operation is unsafe inside a replay boundary";
     return false;
 }
 
@@ -219,7 +232,7 @@ bool DebuggerAdapter::IsShellReady() const
 bool DebuggerAdapter::IsReadyForTargetStart() const
 {
 #if C_DEBUG
-    return IsShellReady() && DEBUG_AgentCanStartTarget();
+    return IsShellReady() && AGENT_StartupStartAllowed() && DEBUG_AgentCanStartTarget();
 #else
     return false;
 #endif
@@ -236,10 +249,15 @@ std::uint64_t DebuggerAdapter::EntryBreakpointSequence() const
 
 bool DebuggerAdapter::Continue(std::string* error) const
 {
-    if (!RequireAvailable(error) || !RequireEmulationThread(error))
+    if (!RequireAvailable(error) || !RequireEmulationThread(error) || !AGENT_CheckpointHealthy(error))
         return false;
 
 #if C_DEBUG
+    if (AGENT_ReplayExitHeld()) {
+        if (error) *error = "selected DOS process has exited; terminate the host process after collecting evidence";
+        return false;
+    }
+    if (AGENT_ReplayReleaseBoundary()) return true;
     DEBUG_AgentClearLastBreakpoint();
     char command[] = "RUN";
     if (ParseCommand(command))
@@ -253,12 +271,19 @@ bool DebuggerAdapter::Continue(std::string* error) const
 #endif
 }
 
+bool DebuggerAdapter::ReplayBoundaryHeld() const { return AGENT_ReplayBoundaryHeld(); }
+bool DebuggerAdapter::ReplayExitHeld() const { return AGENT_ReplayExitHeld(); }
+
 bool DebuggerAdapter::Pause(std::string* error) const
 {
     if (!RequireAvailable(error) || !RequireEmulationThread(error))
         return false;
 
 #if C_DEBUG
+    if (AGENT_ReplayBoundaryHeld()) {
+        if (error) *error = "already held at a replay boundary";
+        return false;
+    }
     DEBUG_EnableDebugger();
     return true;
 #else
@@ -269,9 +294,10 @@ bool DebuggerAdapter::Pause(std::string* error) const
 bool DebuggerAdapter::StartTargetAtEntry(const std::string& command,
                                          const std::vector<std::string>& arguments,
                                          const std::string& workdir,
+                                         const std::string& dos_directory,
                                          std::string* error) const
 {
-    if (!RequireAvailable(error) || !RequireEmulationThread(error))
+    if (!RequireAvailable(error) || !RequireEmulationThread(error) || !AGENT_CheckpointHealthy(error))
         return false;
 
 #if C_DEBUG
@@ -281,6 +307,8 @@ bool DebuggerAdapter::StartTargetAtEntry(const std::string& command,
         return false;
     }
     dos.psp(DOS_ShellGetPSP());
+    AGENT_ReplayReset();
+    AGENT_CheckpointReset();
     if (workdir.empty() || workdir.find('"') != std::string::npos) {
         if (error != NULL)
             *error = "Configured workdir cannot be mounted safely";
@@ -297,6 +325,10 @@ bool DebuggerAdapter::StartTargetAtEntry(const std::string& command,
         }
         return true;
     };
+    if (!ValidLaunchDirectory(dos_directory)) {
+        if (error) *error = "target.directory must be a C-drive-relative DOS 8.3 directory";
+        return false;
+    }
     if (!is_dos_token(command)) {
         if (error != NULL)
             *error = "target.command must be a DOS filename without shell metacharacters";
@@ -314,7 +346,7 @@ bool DebuggerAdapter::StartTargetAtEntry(const std::string& command,
     // for every session is not idempotent: the DOS command reports an existing
     // drive through its normal output path and can leave a stale DOS error code.
     if (Drives[2] == NULL) {
-        std::string mount_command = "MOUNT C \"" + workdir + "\"";
+        std::string mount_command = "MOUNT -q C \"" + workdir + "\"";
         first_shell->DoCommand(&mount_command[0]);
         if (Drives[2] == NULL) {
             if (error != NULL)
@@ -327,11 +359,20 @@ bool DebuggerAdapter::StartTargetAtEntry(const std::string& command,
             *error = "Configured C drive is unavailable";
         return false;
     }
+    // Preserve the mount root for parent-relative and CD installation paths.
+    std::string guest_directory = "C:\\";
+    for (const char c : dos_directory) guest_directory += c == '/' ? '\\' : c;
+    if (!DOS_ChangeDir(guest_directory.c_str())) {
+        if (error) *error = "Target DOS working directory is unavailable";
+        return false;
+    }
 
     std::string debugbox_command = "DEBUGBOX " + command;
     for (std::vector<std::string>::const_iterator it = arguments.begin(); it != arguments.end(); ++it)
         debugbox_command += " " + *it;
     dos.errorcode = 0;
+    AGENT_ExecReset();
+    AGENT_ReleaseStartupBarrier();
     first_shell->DoCommand(&debugbox_command[0]);
     if (dos.errorcode != 0) {
         if (error != NULL)
@@ -343,8 +384,27 @@ bool DebuggerAdapter::StartTargetAtEntry(const std::string& command,
     (void)command;
     (void)arguments;
     (void)workdir;
+    (void)dos_directory;
     return false;
 #endif
+}
+
+bool DebuggerAdapter::ReplayCommand(const JsonValue& params, JsonValue* result, std::string* error) const
+{
+    if (!RequireAvailable(error) || !RequireEmulationThread(error)) return false;
+    return AGENT_ReplayCommand(params, result, error);
+}
+
+bool DebuggerAdapter::CaptureVideo(VideoSnapshot* result, std::string* error) const
+{
+    if (!RequireAvailable(error) || !RequireEmulationThread(error)) return false;
+    return AGENT_CaptureVideo(result, error);
+}
+
+bool DebuggerAdapter::CheckpointCommand(const JsonValue& params, JsonValue* result, std::string* error) const
+{
+    if (!RequireAvailable(error) || !RequireEmulationThread(error)) return false;
+    return AGENT_CheckpointCommand(params, result, error);
 }
 
 bool DebuggerAdapter::GetRegisters(RegisterSnapshot* registers, std::string* error) const
@@ -378,6 +438,8 @@ bool DebuggerAdapter::GetRegisters(RegisterSnapshot* registers, std::string* err
 
 bool DebuggerAdapter::Step(const StepMode mode, bool* continued, std::string* error) const
 {
+    if (!RequireOutsideReplayBoundary(error)) return false;
+    if (!AGENT_CheckpointHealthy(error)) return false;
     if (!RequireAvailable(error) || !RequireEmulationThread(error) || continued == NULL)
         return false;
 
@@ -405,6 +467,20 @@ bool DebuggerAdapter::ReadMemory(const MemoryAddress& address,
 #if C_DEBUG
     if (access_error != NULL)
         *access_error = MemoryAccessError();
+    if (AGENT_ReplayBoundaryHeld()) {
+        // Nested DOS/BIOS holds permit conventional RAM access only, never MMIO.
+        if (cpu.pmode) {
+            if (error) *error = "replay boundary RAM reads require real mode";
+            return false;
+        }
+        for (std::size_t index = 0; index < length; ++index) {
+            std::uint32_t resolved = 0;
+            if (!ResolveMemoryByte(address, index, &resolved, access_error) || resolved >= 0xa0000u) {
+                if (error) *error = "replay boundary reads are limited to conventional RAM";
+                return false;
+            }
+        }
+    }
     data->clear();
     data->reserve(length);
     for (std::size_t index = 0; index < length; ++index) {
@@ -430,6 +506,7 @@ bool DebuggerAdapter::WriteMemory(const MemoryAddress& address,
                                   MemoryAccessError* access_error,
                                   std::string* error) const
 {
+    if (!RequireOutsideReplayBoundary(error)) return false;
     if (!RequireAvailable(error) || !RequireEmulationThread(error) || after == NULL || data.empty())
         return false;
 
@@ -467,6 +544,7 @@ bool DebuggerAdapter::CreateBreakpoint(const BreakpointKind kind,
                                        MemoryAccessError* access_error,
                                        std::string* error) const
 {
+    if (!RequireOutsideReplayBoundary(error)) return false;
     if (!RequireAvailable(error) || !RequireEmulationThread(error) || breakpoint == NULL)
         return false;
 
@@ -535,6 +613,7 @@ bool DebuggerAdapter::CreateBreakpoint(const BreakpointKind kind,
 
 bool DebuggerAdapter::DeleteBreakpoint(const NativeBreakpoint& breakpoint, std::string* error) const
 {
+    if (!RequireOutsideReplayBoundary(error)) return false;
     if (!RequireAvailable(error) || !RequireEmulationThread(error))
         return false;
 
@@ -563,6 +642,7 @@ bool DebuggerAdapter::ExecuteDiagnosticCommand(const std::string& command,
                                                std::string* raw_output,
                                                std::string* error) const
 {
+    if (!RequireOutsideReplayBoundary(error)) return false;
     if (!RequireAvailable(error) || !RequireEmulationThread(error) || raw_output == NULL)
         return false;
 
@@ -595,6 +675,7 @@ bool DebuggerAdapter::StartTrace(const std::string& detail,
                                  const std::uint32_t instruction_count,
                                  std::string* error) const
 {
+    if (!RequireOutsideReplayBoundary(error)) return false;
     if (!RequireAvailable(error) || !RequireEmulationThread(error))
         return false;
 
@@ -670,6 +751,7 @@ bool DebuggerAdapter::ReadTrace(std::vector<TraceSample>* samples,
 
 bool DebuggerAdapter::StopTrace(std::size_t* event_count, std::string* error) const
 {
+    if (!RequireOutsideReplayBoundary(error)) return false;
     if (!RequireAvailable(error) || !RequireEmulationThread(error) || event_count == NULL)
         return false;
 
@@ -705,10 +787,13 @@ bool DebuggerAdapter::IsTraceComplete() const
 
 bool DebuggerAdapter::TerminateTarget(std::string* error) const
 {
+    if (!RequireOutsideReplayBoundary(error)) return false;
     if (!RequireAvailable(error) || !RequireEmulationThread(error))
         return false;
 
 #if C_DEBUG
+    AGENT_ReplayReset();
+    AGENT_CheckpointReset();
     DOS_Terminate(dos.psp(), false, 0);
 
     // Keep the externally initiated exit equivalent to DOS INT 21h/AH=4Ch.

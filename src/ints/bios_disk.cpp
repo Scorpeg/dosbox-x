@@ -26,6 +26,9 @@
 #include <vector>
 
 #include "dosbox.h"
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+#include "agent/checkpoint.h"
+#endif
 #include "callback.h"
 #include "bios.h"
 #include "bios_disk.h"
@@ -2024,6 +2027,9 @@ static uint32_t floppyDPT_sector_size(void) {
 }
 
 static Bitu INT13_DiskHandler(void) {
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+    dosbox_agent::AGENT_CheckpointGuestService("INT 13h");
+#endif
     uint16_t segat, bufptr;
     uint8_t sectbuf[2048/*CD-ROM support*/];
     uint8_t  drivenum;

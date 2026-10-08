@@ -24,6 +24,9 @@
 
 #include "mem.h"
 #include "bitop.h"
+#if C_DEBUG && defined(C_DOSBOX_AGENT)
+#include "agent/memory_observer.h"
+#endif
 
 class PageHandler;
 class MEM_CalloutObject;
@@ -438,6 +441,22 @@ static INLINE PhysPt64 PAGING_GetPhysicalAddress64(const LinearPt linAddr) {
 
 /* Special inlined memory reading/writing */
 
+#if C_DEBUG && defined(C_DOSBOX_AGENT)
+// Execute original memory operations exactly once, including faults and split accesses.
+#define mem_readb_inline AGENT_UnobservedReadB
+#define mem_readw_inline AGENT_UnobservedReadW
+#define mem_readd_inline AGENT_UnobservedReadD
+#define mem_writeb_inline AGENT_UnobservedWriteB
+#define mem_writew_inline AGENT_UnobservedWriteW
+#define mem_writed_inline AGENT_UnobservedWriteD
+#define mem_readb_checked AGENT_UnobservedCheckedReadB
+#define mem_readw_checked AGENT_UnobservedCheckedReadW
+#define mem_readd_checked AGENT_UnobservedCheckedReadD
+#define mem_writeb_checked AGENT_UnobservedCheckedWriteB
+#define mem_writew_checked AGENT_UnobservedCheckedWriteW
+#define mem_writed_checked AGENT_UnobservedCheckedWriteD
+#endif
+
 static INLINE uint8_t mem_readb_inline(const LinearPt address) {
 	const HostPt tlb_addr=get_tlb_read(address);
 	if (tlb_addr) return host_readb(tlb_addr+address);
@@ -538,6 +557,78 @@ static INLINE bool mem_writed_checked(const LinearPt address,const uint32_t val)
 		} else return (get_tlb_writehandler(address))->writed_checked(address,val);
 	} else return mem_unalignedwrited_checked(address,val);
 }
+
+#if C_DEBUG && defined(C_DOSBOX_AGENT)
+#undef mem_readb_inline
+#undef mem_readw_inline
+#undef mem_readd_inline
+#undef mem_writeb_inline
+#undef mem_writew_inline
+#undef mem_writed_inline
+#undef mem_readb_checked
+#undef mem_readw_checked
+#undef mem_readd_checked
+#undef mem_writeb_checked
+#undef mem_writew_checked
+#undef mem_writed_checked
+
+#define AGENT_MEMORY_SCOPE(type, writing, checked, value) \
+    const bool crossing = (address & 0xfffu) + sizeof(type) > 4096; \
+    const HostPt direct = crossing ? nullptr : (writing ? get_tlb_write(address) : get_tlb_read(address)); \
+    dosbox_agent::MemoryAccessScope access(address, sizeof(type), writing, checked, \
+        crossing ? "cross-page" : direct ? "direct" : "handler", direct != nullptr, \
+        direct ? PAGING_GetPhysicalAddress64(address) : 0, value)
+#define AGENT_MEMORY_ACTIVE (dosbox_agent::AGENT_MemoryAccessEnabled && !dosbox_agent::AGENT_MemoryFetchDepth)
+#define AGENT_MEMORY_READ(name, original, type) \
+    static INLINE type name(const LinearPt address) { \
+        if (!AGENT_MEMORY_ACTIVE) return original(address); \
+        AGENT_MEMORY_SCOPE(type, false, false, 0); \
+        const type value = original(address); \
+        access.Complete(false, true, value); \
+        return value; \
+    }
+#define AGENT_MEMORY_WRITE(name, original, type) \
+    static INLINE void name(const LinearPt address, const type value) { \
+        if (!AGENT_MEMORY_ACTIVE) { original(address, value); return; } \
+        AGENT_MEMORY_SCOPE(type, true, false, value); \
+        original(address, value); \
+        access.Complete(false, true, value); \
+    }
+#define AGENT_MEMORY_CHECKED_READ(name, original, type) \
+    static INLINE bool name(const LinearPt address, type* const value) { \
+        if (!AGENT_MEMORY_ACTIVE) return original(address, value); \
+        AGENT_MEMORY_SCOPE(type, false, true, 0); \
+        const bool fault = original(address, value); \
+        access.Complete(fault, !fault, fault ? 0 : *value); \
+        return fault; \
+    }
+#define AGENT_MEMORY_CHECKED_WRITE(name, original, type) \
+    static INLINE bool name(const LinearPt address, const type value) { \
+        if (!AGENT_MEMORY_ACTIVE) return original(address, value); \
+        AGENT_MEMORY_SCOPE(type, true, true, value); \
+        const bool fault = original(address, value); \
+        access.Complete(fault, true, value); \
+        return fault; \
+    }
+AGENT_MEMORY_READ(mem_readb_inline, AGENT_UnobservedReadB, uint8_t)
+AGENT_MEMORY_READ(mem_readw_inline, AGENT_UnobservedReadW, uint16_t)
+AGENT_MEMORY_READ(mem_readd_inline, AGENT_UnobservedReadD, uint32_t)
+AGENT_MEMORY_WRITE(mem_writeb_inline, AGENT_UnobservedWriteB, uint8_t)
+AGENT_MEMORY_WRITE(mem_writew_inline, AGENT_UnobservedWriteW, uint16_t)
+AGENT_MEMORY_WRITE(mem_writed_inline, AGENT_UnobservedWriteD, uint32_t)
+AGENT_MEMORY_CHECKED_READ(mem_readb_checked, AGENT_UnobservedCheckedReadB, uint8_t)
+AGENT_MEMORY_CHECKED_READ(mem_readw_checked, AGENT_UnobservedCheckedReadW, uint16_t)
+AGENT_MEMORY_CHECKED_READ(mem_readd_checked, AGENT_UnobservedCheckedReadD, uint32_t)
+AGENT_MEMORY_CHECKED_WRITE(mem_writeb_checked, AGENT_UnobservedCheckedWriteB, uint8_t)
+AGENT_MEMORY_CHECKED_WRITE(mem_writew_checked, AGENT_UnobservedCheckedWriteW, uint16_t)
+AGENT_MEMORY_CHECKED_WRITE(mem_writed_checked, AGENT_UnobservedCheckedWriteD, uint32_t)
+#undef AGENT_MEMORY_CHECKED_WRITE
+#undef AGENT_MEMORY_CHECKED_READ
+#undef AGENT_MEMORY_WRITE
+#undef AGENT_MEMORY_READ
+#undef AGENT_MEMORY_ACTIVE
+#undef AGENT_MEMORY_SCOPE
+#endif
 
 extern bool dosbox_allow_nonrecursive_page_fault;	/* when set, do nonrecursive mode (when executing instruction) */
 

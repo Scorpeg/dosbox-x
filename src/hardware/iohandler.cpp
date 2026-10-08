@@ -26,6 +26,9 @@
 #include "cpu.h"
 #include "../src/cpu/lazyflags.h"
 #include "callback.h"
+#if C_DEBUG && C_DOSBOX_AGENT
+#include "agent/io_observer.h"
+#endif
 
 //#define ENABLE_PORTLOG
 
@@ -491,6 +494,9 @@ void log_io(Bitu width, bool write, Bitu port, Bitu val) {
 
 
 void IO_WriteB(Bitu port,uint8_t val) {
+#if C_DEBUG && C_DOSBOX_AGENT
+	dosbox_agent::EffectIoScope effect(port, 1, true, val);
+#endif
 	log_io(0, true, port, val);
 	if (GCC_UNLIKELY(GETFLAG(VM) && (CPU_IO_Exception(port,1)))) {
 		CPU_ForceV86FakeIO_Out(port,val,1);
@@ -499,9 +505,15 @@ void IO_WriteB(Bitu port,uint8_t val) {
 		IO_USEC_write_delay(0);
 		io_writehandlers[0][port](port,val,1);
 	}
+#if C_DEBUG && C_DOSBOX_AGENT
+	effect.Returned();
+#endif
 }
 
 void IO_WriteW(Bitu port,uint16_t val) {
+#if C_DEBUG && C_DOSBOX_AGENT
+	dosbox_agent::EffectIoScope effect(port, 2, true, val);
+#endif
 	log_io(1, true, port, val);
 	if (GCC_UNLIKELY(GETFLAG(VM) && (CPU_IO_Exception(port,2)))) {
 		CPU_ForceV86FakeIO_Out(port,val,2);
@@ -510,9 +522,15 @@ void IO_WriteW(Bitu port,uint16_t val) {
 		IO_USEC_write_delay(1);
 		io_writehandlers[1][port](port,val,2);
 	}
+#if C_DEBUG && C_DOSBOX_AGENT
+	effect.Returned();
+#endif
 }
 
 void IO_WriteD(Bitu port,uint32_t val) {
+#if C_DEBUG && C_DOSBOX_AGENT
+	dosbox_agent::EffectIoScope effect(port, 4, true, val);
+#endif
 	log_io(2, true, port, val);
 	if (GCC_UNLIKELY(GETFLAG(VM) && (CPU_IO_Exception(port,4)))) {
 		CPU_ForceV86FakeIO_Out(port,val,4);
@@ -521,44 +539,77 @@ void IO_WriteD(Bitu port,uint32_t val) {
 		IO_USEC_write_delay(2);
 		io_writehandlers[2][port](port,val,4);
 	}
+#if C_DEBUG && C_DOSBOX_AGENT
+	effect.Returned();
+#endif
 }
 
 uint8_t IO_ReadB(Bitu port) {
+#if C_DEBUG && C_DOSBOX_AGENT
+	dosbox_agent::EffectIoScope effect(port, 1, false);
+#endif
 	uint8_t retval;
 	if (GCC_UNLIKELY(GETFLAG(VM) && (CPU_IO_Exception(port,1)))) {
-		return (uint8_t)CPU_ForceV86FakeIO_In(port,1);
+		retval = (uint8_t)CPU_ForceV86FakeIO_In(port,1);
+#if C_DEBUG && C_DOSBOX_AGENT
+		effect.Returned(retval);
+#endif
+		return retval;
 	}
 	else {
 		IO_USEC_read_delay(0);
 		retval = (uint8_t)io_readhandlers[0][port](port,1);
 	}
 	log_io(0, false, port, retval);
+#if C_DEBUG && C_DOSBOX_AGENT
+	effect.Returned(retval);
+#endif
 	return retval;
 }
 
 uint16_t IO_ReadW(Bitu port) {
+#if C_DEBUG && C_DOSBOX_AGENT
+	dosbox_agent::EffectIoScope effect(port, 2, false);
+#endif
 	uint16_t retval;
 	if (GCC_UNLIKELY(GETFLAG(VM) && (CPU_IO_Exception(port,2)))) {
-		return (uint16_t)CPU_ForceV86FakeIO_In(port,2);
+		retval = (uint16_t)CPU_ForceV86FakeIO_In(port,2);
+#if C_DEBUG && C_DOSBOX_AGENT
+		effect.Returned(retval);
+#endif
+		return retval;
 	}
 	else {
 		IO_USEC_read_delay(1);
 		retval = (uint16_t)io_readhandlers[1][port](port,2);
 	}
 	log_io(1, false, port, retval);
+#if C_DEBUG && C_DOSBOX_AGENT
+	effect.Returned(retval);
+#endif
 	return retval;
 }
 
 uint32_t IO_ReadD(Bitu port) {
+#if C_DEBUG && C_DOSBOX_AGENT
+	dosbox_agent::EffectIoScope effect(port, 4, false);
+#endif
 	uint32_t retval;
 	if (GCC_UNLIKELY(GETFLAG(VM) && (CPU_IO_Exception(port,4)))) {
-		return (uint32_t)CPU_ForceV86FakeIO_In(port,4);
+		retval = (uint32_t)CPU_ForceV86FakeIO_In(port,4);
+#if C_DEBUG && C_DOSBOX_AGENT
+		effect.Returned(retval);
+#endif
+		return retval;
 	}
 	else {
 		IO_USEC_read_delay(2);
 		retval = (uint32_t)io_readhandlers[2][port](port,4);
 	}
 	log_io(2, false, port, retval);
+#if C_DEBUG && C_DOSBOX_AGENT
+	effect.Returned(retval);
+#endif
 	return retval;
 }
 

@@ -396,6 +396,18 @@ static PIT_Block pit[3];
 
 unsigned long PIT_TICK_RATE = PIT_TICK_RATE_IBM;
 
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+#include "agent/speaker_capture.h"
+namespace dosbox_agent {
+bool AGENT_PitStorage(SpeakerBytes& bytes) {
+    bytes.u64(PIT_TICK_RATE); bytes.u8(pit_status_latch_read_anywhere);
+    bytes.u8(speaker_clock_lock_on); bytes.u8(VGA_PITsync); bytes.real64(vga_fps);
+    for (const auto& timer : pit) if (!SpeakerPitBytes(timer, bytes)) return false;
+    return bytes.valid;
+}
+}
+#endif
+
 pic_tickindex_t VGA_PITSync_delay();
 
 static void PIT0_Event(Bitu /*val*/) {

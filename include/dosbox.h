@@ -377,6 +377,13 @@ public:
 
     void registerComponent(const std::string& uniqueName, Component& comp); //comp must have global lifetime!
 
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+    // Trusted same-process images only; never deserialize client-supplied bytes.
+    typedef std::map<std::string, std::string> AgentImage;
+    bool captureAgentImage(AgentImage* image, std::string* error);
+    bool restoreAgentImage(const AgentImage& image, std::string* error);
+#endif
+
 private:
     SaveState() {}
     SaveState(const SaveState&);
@@ -500,4 +507,3 @@ int mkdir_p(const char *pathname, mode_t mode);
 
 extern duk_context *js_heap;
 #endif
-

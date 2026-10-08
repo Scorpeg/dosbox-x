@@ -36,6 +36,16 @@ void Mouse_ChangePS2Callback(uint16_t pseg, uint16_t pofs);
 
 
 void Mouse_CursorMoved(float xrel,float yrel,float x,float y,bool emulate);
+struct MouseMotionContext {
+    bool locked, driver_emulated;
+    int x, y, width, height;
+};
+MouseMotionContext Mouse_GetMotionContext();
+void Mouse_CursorMovedContext(float xrel, float yrel, float x, float y, bool emulate, const MouseMotionContext& context);
+void Mouse_HostMotion(float xrel, float yrel, float x, float y, bool emulate);
+void Mouse_HostButton(uint8_t button, bool pressed);
+void Mouse_HostWheel(int32_t scroll);
+unsigned Mouse_EventQueueSize();
 const char* Mouse_GetSelected(int x1, int y1, int x2, int y2, int w, int h, uint16_t *textlen);
 #if defined(WIN32) || defined(MACOSX) || defined(C_SDL2)
 void Mouse_Select(int x1, int y1, int x2, int y2, int w, int h, bool select);

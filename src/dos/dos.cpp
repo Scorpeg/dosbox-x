@@ -29,6 +29,9 @@
 
 #include "control.h"
 #include "dosbox.h"
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+#include "agent/checkpoint.h"
+#endif
 #include "dos_inc.h"
 #include "bios_disk.h"
 #include "bios.h"
@@ -1030,6 +1033,9 @@ void DOS_FlushSTDIN(void) {
 }
 
 static Bitu DOS_21Handler(void) {
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+    dosbox_agent::AGENT_CheckpointGuestService("INT 21h");
+#endif
     bool unmask_irq0 = false;
 
 #if !defined(OSFREE)

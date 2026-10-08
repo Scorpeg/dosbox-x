@@ -26,6 +26,7 @@
  *  51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  */
 
+#include "config.h"
 #ifdef WIN32
 # ifndef WIN32_LEAN_AND_MEAN
 #  define WIN32_LEAN_AND_MEAN
@@ -35,6 +36,9 @@
 #if defined(C_DOSBOX_AGENT)
 #include "agent/agent_bridge.h"
 #include "agent/agent_server.h"
+#if defined(C_DEBUG)
+#include "agent/replay_timeline.h"
+#endif
 #endif
 
 #ifdef OS2
@@ -1353,6 +1357,9 @@ bool systemmessagebox(char const * aTitle, char const * aMessage, char const * a
 }
 
 bool CheckQuit(void) {
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+    if (dosbox_agent::AGENT_ReplayRequestFinish("window-close")) return false;
+#endif
 #if !defined(HX_DOS)
     Section_prop *section = static_cast<Section_prop *>(control->GetSection("dosbox"));
     std::string warn = section->Get_string("quit warning");
@@ -2677,6 +2684,9 @@ void GFX_CaptureMouse(void) {
 }
 
 void GFX_CaptureMouse(bool capture) {
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+    if (sdl.mouse.locked != capture) dosbox_agent::AGENT_ReplayHostCapture(capture);
+#endif
     sdl.mouse.locked=capture;
     if (sdl.mouse.locked) {
 #if defined(C_SDL2)
@@ -4897,7 +4907,7 @@ static void HandleMouseMotion(SDL_MouseMotionEvent * motion) {
 #endif
             SDL_ShowCursor(((!inside) || ((MOUSE_IsHidden()) && !(MOUSE_IsBeingPolled() || MOUSE_HasInterruptSub()))) ? SDL_ENABLE : SDL_DISABLE);
     }
-    Mouse_CursorMoved(xrel, yrel, x, y, emu);
+    Mouse_HostMotion(xrel, yrel, x, y, emu);
     VMWARE_MousePosition(motion->x, motion->y);
 }
 
@@ -4959,7 +4969,7 @@ void MenuFreeScreen(void) {
 
 static void HandleMouseWheel(bool normal, int amount) {
     if (amount != 0) {
-        Mouse_WheelMoved(normal ? -amount : amount);
+        Mouse_HostWheel(normal ? -amount : amount);
         if (vmware_mouse) VMWARE_MouseWheel(normal ? -amount : amount);
     }
 }
@@ -5506,15 +5516,15 @@ static void HandleMouseButton(SDL_MouseButtonEvent * button, SDL_MouseMotionEven
         }
         switch (button->button) {
         case SDL_BUTTON_LEFT:
-            Mouse_ButtonPressed(0);
+            Mouse_HostButton(0, true);
             VMWARE_MouseButtonPressed(0);
             break;
         case SDL_BUTTON_RIGHT:
-            Mouse_ButtonPressed(1);
+            Mouse_HostButton(1, true);
             VMWARE_MouseButtonPressed(1);
             break;
         case SDL_BUTTON_MIDDLE:
-            Mouse_ButtonPressed(2);
+            Mouse_HostButton(2, true);
             VMWARE_MouseButtonPressed(2);
             break;
 #if !defined(C_SDL2)
@@ -5619,15 +5629,15 @@ static void HandleMouseButton(SDL_MouseButtonEvent * button, SDL_MouseMotionEven
 #endif
         switch (button->button) {
         case SDL_BUTTON_LEFT:
-            Mouse_ButtonReleased(0);
+            Mouse_HostButton(0, false);
             VMWARE_MouseButtonReleased(0);
             break;
         case SDL_BUTTON_RIGHT:
-            Mouse_ButtonReleased(1);
+            Mouse_HostButton(1, false);
             VMWARE_MouseButtonReleased(1);
             break;
         case SDL_BUTTON_MIDDLE:
-            Mouse_ButtonReleased(2);
+            Mouse_HostButton(2, false);
             VMWARE_MouseButtonReleased(2);
             break;
 #if !defined(C_SDL2)
@@ -5952,6 +5962,40 @@ void GFX_Events() {
 
     while (SDL_PollEvent(&event)) {
 #if defined(C_SDL2)
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+#if DOSBOXMENU_TYPE == DOSBOXMENU_SDLDRAW
+        // Consume recorder clicks before guest dispatch; never enter the blocking menu loop.
+        static bool recorder_button_down = false;
+        if (event.type == SDL_MOUSEBUTTONUP && event.button.button == SDL_BUTTON_LEFT && recorder_button_down) {
+            recorder_button_down = false;
+            continue;
+        }
+        if (!sdl.mouse.locked && !sdl.desktop.fullscreen && mainMenu.isVisible() &&
+            mainMenu.item_exists("agent_stop_recording")) {
+            const bool motion = event.type == SDL_MOUSEMOTION;
+            const bool button = event.type == SDL_MOUSEBUTTONDOWN || event.type == SDL_MOUSEBUTTONUP;
+            const int x = motion ? event.motion.x : event.button.x;
+            const int y = motion ? event.motion.y : event.button.y;
+            if ((motion || button) && y >= 0 && y < mainMenu.menuBox.h) {
+                if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT) {
+                    recorder_button_down = true;
+                    const auto hit = mainMenu.display_list.itemFromPoint(mainMenu, x, y);
+                    if (hit == mainMenu.get_item_id_by_name("agent_stop_recording") &&
+                        dosbox_agent::AGENT_ReplayRequestFinish("stop-button")) {
+                        mainMenu.get_item(hit).set_text("Saving recording...").refresh_item(mainMenu);
+                    }
+                }
+                continue;
+            }
+        }
+#endif
+        if ((event.type == SDL_MOUSEMOTION || event.type == SDL_MOUSEBUTTONDOWN ||
+             event.type == SDL_MOUSEBUTTONUP || event.type == SDL_MOUSEWHEEL ||
+             event.type == SDL_FINGERDOWN || event.type == SDL_FINGERUP ||
+             event.type == SDL_FINGERMOTION) && dosbox_agent::AGENT_ReplayHostPointer(
+                 event.type == SDL_FINGERDOWN || event.type == SDL_FINGERUP || event.type == SDL_FINGERMOTION))
+            continue;
+#endif
         /* SDL2 hack: There seems to be a problem where calling the SetWindowSize function,
            even for the same size, still causes a resize event, and sometimes for no apparent
            reason, will cause an endless feed of Windows Restored events. */
@@ -7058,6 +7102,10 @@ void SDL_SetupConfigSection() {
     Pbool = sdl_sec->Add_bool("showmenu", Property::Changeable::Always, true);
     Pbool->Set_help("Whether to show the menu bar (if supported). Default true.");
     Pbool->SetBasic(true);
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT) && defined(C_SDL2)
+    Pbool = sdl_sec->Add_bool("recording controls", Property::Changeable::OnlyAtStart, false);
+    Pbool->Set_help("Replace menus with a Stop recording button for the external replay controller.");
+#endif
 
 //  Pint = sdl_sec->Add_int("overscancolor",Property::Changeable::Always, 0);
 //  Pint->SetMinMax(0,1000);
@@ -9600,7 +9648,13 @@ int main(int argc, char* argv[]) SDL_MAIN_NOEXCEPT {
 	LOG_MSG("Prevent capture: %u",preventcap);
 
         /* -- SDL init */
-        if (SDL_Init(SDL_INIT_AUDIO|SDL_INIT_VIDEO|SDL_INIT_TIMER|SDL_INIT_NOPARACHUTE) >= 0)
+        Uint32 sdl_init_flags = SDL_INIT_AUDIO|SDL_INIT_VIDEO|SDL_INIT_TIMER|SDL_INIT_NOPARACHUTE;
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+        // Start isolated guest audio even without a host driver; MIXER_Init opens the optional sink.
+        if (static_cast<Section_prop*>(control->GetSection("mixer"))->Get_bool("isolated output"))
+            sdl_init_flags &= ~SDL_INIT_AUDIO;
+#endif
+        if (SDL_Init(sdl_init_flags) >= 0)
             sdl.inited = true;
         else
             E_Exit("Can't init SDL %s",SDL_GetError());

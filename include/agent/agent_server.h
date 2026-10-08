@@ -37,7 +37,8 @@ private:
                                              const std::string& session_id,
                                              const std::string& target_command,
                                              const std::vector<std::string>& target_arguments,
-                                             const std::string& workdir);
+                                             const std::string& workdir,
+                                             const std::string& dos_directory);
     static void CompleteTargetTerminationOnEmulationThread(const std::shared_ptr<Impl>& impl,
                                                            const std::string& session_id,
                                                            const std::string& operation_id);

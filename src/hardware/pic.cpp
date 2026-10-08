@@ -34,6 +34,10 @@
 
 #define PIC_QUEUESIZE 8192
 
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+#include "agent/replay_timeline.h"
+#endif
+
 unsigned long PIC_irq_delay_ns = 0;
 
 bool never_mark_cascade_in_service = false;
@@ -654,6 +658,17 @@ static void AddEntry(PICEntry * entry) {
 static bool InEventService = false;
 static pic_tickindex_t srv_lag = 0;
 
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+bool AGENT_PicCheckpointSafe() { return !InEventService; }
+void AGENT_SavePicExact(std::ostream& stream) {
+    // Contains native pointers and long doubles; restore only within the same process.
+    WRITE_POD(&pic_queue, pic_queue); WRITE_POD(&srv_lag, srv_lag);
+}
+void AGENT_LoadPicExact(std::istream& stream) {
+    READ_POD(&pic_queue, pic_queue); READ_POD(&srv_lag, srv_lag);
+}
+#endif
+
 pic_tickindex_t PIC_GetCurrentEventTime(void) {
     if (InEventService)
         return (pic_tickindex_t)PIC_Ticks + srv_lag;
@@ -875,6 +890,11 @@ void TIMER_AddTick(void) {
         entry=entry->next;
     }
 
+    // Deliver input after PIC queue rebase, before tick handlers.
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+    dosbox_agent::AGENT_ReplayTick();
+#endif
+
     /* Call our list of ticker handlers */
     TickerBlock * ticker=firstticker;
     while (ticker) {
@@ -882,6 +902,9 @@ void TIMER_AddTick(void) {
         ticker->handler();
         ticker=nextticker;
     }
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+    dosbox_agent::AGENT_ReplayTickBoundary();
+#endif
 }
 
 static IO_WriteHandleObject PCXT_NMI_WriteHandler;
@@ -1489,4 +1512,3 @@ private:
     }
 } dummy;
 }
-

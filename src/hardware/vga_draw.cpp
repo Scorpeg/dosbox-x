@@ -4020,7 +4020,7 @@ again:
                     memxor_greendotted_16bpp((uint16_t*)TempLine,(vga.draw.width>>1)*(vga.draw.bpp>>3),vga.draw.lines_done);
                 vga_3da_polled = false;
             }
-            RENDER_DrawLine(TempLine);
+            RENDER_SubmitLine(TempLine);
         } else {
             if ((CaptureState & CAPTURE_RAWIMAGE) && VGA_DrawRawLine && rawshot.capturing) {
                 if (rawshot.render_y < rawshot.image_height && rawshot.image != NULL) {
@@ -4078,7 +4078,7 @@ again:
                 }
             }
 
-            RENDER_DrawLine(data);
+            RENDER_SubmitLine(data);
         }
     }
 
@@ -4152,7 +4152,7 @@ static void VGA_DrawEGASingleLine(Bitu /*blah*/) {
     if (!skiprender) {
         if (GCC_UNLIKELY(vga.attr.disabled && !vga.dosboxig.svga)) {
             memset(TempLine, 0, TempLineSize);
-            RENDER_DrawLine(TempLine);
+            RENDER_SubmitLine(TempLine);
         } else {
             Bitu address = vga.draw.address;
             if (machine != MCH_EGA) {
@@ -4180,7 +4180,7 @@ static void VGA_DrawEGASingleLine(Bitu /*blah*/) {
             uint8_t * data=VGA_DrawLine(address, vga.draw.address_line ); 
             if (video_debug_overlay && vga.draw.width < render.src.width) VGA_DrawDebugLine(data+(vga.draw.width*((vga.draw.bpp+7u)>>3u)),render.src.width-vga.draw.width);
 
-            RENDER_DrawLine(data);
+            RENDER_SubmitLine(data);
         }
     }
 
@@ -4509,7 +4509,7 @@ void VGA_DebugOverlay() {
     if (vga.draw.lines_done < vga.draw.lines_total) return;
 
     for (unsigned int y=0;y < VGA_debug_screen_h && render.scale.inLine < render.src.height;y++)
-        RENDER_DrawLine(VGA_debug_screen+(y*VGA_debug_screen_stride));
+        RENDER_SubmitLine(VGA_debug_screen+(y*VGA_debug_screen_stride));
 }
 
 EGAMonitorMode egaMonitorMode(void);
@@ -8620,6 +8620,25 @@ void *VGA_PanningLatch_PIC_Event = (void*)((uintptr_t)VGA_PanningLatch);
 void *VGA_VertInterrupt_PIC_Event = (void*)((uintptr_t)VGA_VertInterrupt);
 void *VGA_VerticalTimer_PIC_Event = (void*)((uintptr_t)VGA_VerticalTimer);
 
+
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+void AGENT_SaveVgaDrawExact(std::ostream& stream) {
+    // Preserve draw phase and native pointers across VGA load; allocations must remain unchanged.
+    WRITE_POD(&vga, vga);
+    WRITE_POD(&VGA_DrawLine, VGA_DrawLine); WRITE_POD(&VGA_DrawRawLine, VGA_DrawRawLine);
+    // These globals affect future PIC timing but are outside the VGA struct.
+    WRITE_POD(&vga_fps, vga_fps);
+    WRITE_POD(&vga_mode_time_base, vga_mode_time_base);
+    WRITE_POD(&vga_mode_frames_since_time_base, vga_mode_frames_since_time_base);
+}
+void AGENT_LoadVgaDrawExact(std::istream& stream) {
+    READ_POD(&vga, vga);
+    READ_POD(&VGA_DrawLine, VGA_DrawLine); READ_POD(&VGA_DrawRawLine, VGA_DrawRawLine);
+    READ_POD(&vga_fps, vga_fps);
+    READ_POD(&vga_mode_time_base, vga_mode_time_base);
+    READ_POD(&vga_mode_frames_since_time_base, vga_mode_frames_since_time_base);
+}
+#endif
 
 void POD_Save_VGA_Draw( std::ostream& stream )
 {

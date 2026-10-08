@@ -1,3 +1,4 @@
+#include "config.h"
 #if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
 #include "agent/agent_server.h"
 
@@ -5,6 +6,9 @@
 #include "agent/debugger_adapter.h"
 #include "agent/debugger_output_parser.h"
 #include "agent/trace_store.h"
+#include "agent/video_snapshot.h"
+#include "agent/exec_observer.h"
+#include "agent/launch_directory.h"
 #include "../transport/rpc_transport.h"
 
 #include <algorithm>
@@ -103,6 +107,22 @@ static bool GetUnsignedInteger(const JsonValue& value, std::uint32_t* result)
     }
 
     *result = static_cast<std::uint32_t>(parsed);
+    return true;
+}
+
+static bool GetRevision(const JsonValue* value, std::uint64_t* result)
+{
+    if (!value || value->type != JsonType::Number || value->text.empty())
+        return false;
+    std::uint64_t parsed = 0;
+    for (const char c : value->text) {
+        if (c < '0' || c > '9') return false;
+        const unsigned int digit = static_cast<unsigned int>(c - '0');
+        if (parsed > ((std::numeric_limits<std::uint64_t>::max)() - digit) / 10)
+            return false;
+        parsed = parsed * 10 + digit;
+    }
+    *result = parsed;
     return true;
 }
 
@@ -448,6 +468,7 @@ static bool IsKnownMethod(const std::string& method)
            method == "execution.step" ||
            method == "execution.wait" ||
            method == "state.get_registers" ||
+           method == "replay.control" || method == "exec.control" || method == "state.capture" || method == "state.substitute" || method == "video.capture" || method == "checkpoint.control" ||
            method == "memory.read" ||
            method == "memory.write" ||
            method == "breakpoints.create" ||
@@ -461,6 +482,8 @@ static bool IsKnownMethod(const std::string& method)
 }
 
 } // namespace
+
+std::string AGENT_Sha256Hex(const std::vector<std::uint8_t>& data) { return Sha256Hex(data); }
 
 class AgentServer::Impl {
 public:
@@ -517,6 +540,8 @@ public:
         std::vector<std::uint8_t> data;
         NativeBreakpoint breakpoint;
         std::string raw_output;
+        JsonValue replay_result;
+        VideoSnapshot video;
         std::vector<TraceSample> trace_samples;
         bool trace_active = false;
         std::size_t trace_event_count = 0;
@@ -597,15 +622,18 @@ public:
 
     virtual ~AgentRuntime() {}
     virtual bool RequireAvailable(std::string* error) const = 0;
-    virtual std::uint64_t Submit(Command command) = 0;
+    virtual std::uint64_t Submit(Command command, bool drain_safe = false) = 0;
     virtual std::uint64_t SubmitAfter(std::uint32_t delay_ms, Command command) = 0;
     virtual bool IsReadyForTargetStart() const = 0;
     virtual std::uint64_t EntryBreakpointSequence() const = 0;
     virtual bool Continue(std::string* error) const = 0;
+    virtual bool ReplayBoundaryHeld() const { return false; }
+    virtual bool ReplayExitHeld() const { return false; }
     virtual bool Pause(std::string* error) const = 0;
     virtual bool StartTargetAtEntry(const std::string& command,
                                     const std::vector<std::string>& arguments,
                                     const std::string& workdir,
+                                    const std::string& dos_directory,
                                     std::string* error) const = 0;
     virtual bool GetRegisters(RegisterSnapshot* registers, std::string* error) const = 0;
     virtual bool Step(StepMode mode, bool* continued, std::string* error) const = 0;
@@ -634,6 +662,21 @@ public:
     virtual bool ReadTrace(std::vector<TraceSample>* samples, bool* active, std::string* error) const = 0;
     virtual bool StopTrace(std::size_t* event_count, std::string* error) const = 0;
     virtual bool TerminateTarget(std::string* error) const = 0;
+    virtual bool ReplayCommand(const JsonValue&, JsonValue*, std::string* error) const
+    {
+        if (error) *error = "keyboard timeline is unavailable in the fake runtime";
+        return false;
+    }
+    virtual bool CaptureVideo(VideoSnapshot*, std::string* error) const
+    {
+        if (error) *error = "native video capture is unavailable in the fake runtime";
+        return false;
+    }
+    virtual bool CheckpointCommand(const JsonValue&, JsonValue*, std::string* error) const
+    {
+        if (error) *error = "checkpoints are unavailable in the fake runtime";
+        return false;
+    }
 };
 
 class ProductionAgentRuntime final : public AgentRuntime {
@@ -644,9 +687,9 @@ public:
         return adapter.RequireAvailable(error);
     }
 
-    std::uint64_t Submit(Command command) override
+    std::uint64_t Submit(Command command, bool drain_safe = false) override
     {
-        return AGENT_EmulationQueue().Submit(std::move(command));
+        return AGENT_EmulationQueue().Submit(std::move(command), drain_safe);
     }
 
     std::uint64_t SubmitAfter(const std::uint32_t delay_ms, Command command) override
@@ -659,8 +702,10 @@ public:
     AGENT_RUNTIME_FORWARD(IsReadyForTargetStart, bool IsReadyForTargetStart() const, ())
     AGENT_RUNTIME_FORWARD(EntryBreakpointSequence, std::uint64_t EntryBreakpointSequence() const, ())
     AGENT_RUNTIME_FORWARD(Continue, bool Continue(std::string* error) const, (error))
+    AGENT_RUNTIME_FORWARD(ReplayBoundaryHeld, bool ReplayBoundaryHeld() const, ())
+    AGENT_RUNTIME_FORWARD(ReplayExitHeld, bool ReplayExitHeld() const, ())
     AGENT_RUNTIME_FORWARD(Pause, bool Pause(std::string* error) const, (error))
-    AGENT_RUNTIME_FORWARD(StartTargetAtEntry, bool StartTargetAtEntry(const std::string& command, const std::vector<std::string>& arguments, const std::string& workdir, std::string* error) const, (command, arguments, workdir, error))
+    AGENT_RUNTIME_FORWARD(StartTargetAtEntry, bool StartTargetAtEntry(const std::string& command, const std::vector<std::string>& arguments, const std::string& workdir, const std::string& dos_directory, std::string* error) const, (command, arguments, workdir, dos_directory, error))
     AGENT_RUNTIME_FORWARD(GetRegisters, bool GetRegisters(RegisterSnapshot* registers, std::string* error) const, (registers, error))
     AGENT_RUNTIME_FORWARD(Step, bool Step(StepMode mode, bool* continued, std::string* error) const, (mode, continued, error))
     AGENT_RUNTIME_FORWARD(ReadMemory, bool ReadMemory(const MemoryAddress& address, std::size_t length, std::vector<std::uint8_t>* data, MemoryAccessError* access_error, std::string* error) const, (address, length, data, access_error, error))
@@ -673,6 +718,9 @@ public:
     AGENT_RUNTIME_FORWARD(ReadTrace, bool ReadTrace(std::vector<TraceSample>* samples, bool* active, std::string* error) const, (samples, active, error))
     AGENT_RUNTIME_FORWARD(StopTrace, bool StopTrace(std::size_t* event_count, std::string* error) const, (event_count, error))
     AGENT_RUNTIME_FORWARD(TerminateTarget, bool TerminateTarget(std::string* error) const, (error))
+    AGENT_RUNTIME_FORWARD(ReplayCommand, bool ReplayCommand(const JsonValue& params, JsonValue* result, std::string* error) const, (params, result, error))
+    AGENT_RUNTIME_FORWARD(CaptureVideo, bool CaptureVideo(VideoSnapshot* result, std::string* error) const, (result, error))
+    AGENT_RUNTIME_FORWARD(CheckpointCommand, bool CheckpointCommand(const JsonValue& params, JsonValue* result, std::string* error) const, (params, result, error))
 #undef AGENT_RUNTIME_FORWARD
 };
 
@@ -680,7 +728,7 @@ class FakeAgentRuntime final : public AgentRuntime {
 public:
     bool RequireAvailable(std::string*) const override { return true; }
 
-    std::uint64_t Submit(Command command) override
+    std::uint64_t Submit(Command command, bool = false) override
     {
         return Launch(0, std::move(command));
     }
@@ -703,6 +751,7 @@ public:
 
     bool StartTargetAtEntry(const std::string&,
                             const std::vector<std::string>&,
+                            const std::string&,
                             const std::string&,
                             std::string*) const override
     {
@@ -811,24 +860,24 @@ private:
 static std::uint64_t SubmitEmulationCommandWithState(const std::shared_ptr<AgentServer::Impl>& impl,
                                                       const std::shared_ptr<AgentRuntime>& runtime,
                                                       const std::uint64_t generation,
-                                                      EmulationThreadQueue::Command command)
+                                                      EmulationThreadQueue::Command command, bool drain_safe = false)
 {
     return runtime->Submit([impl, runtime, generation, command](const std::uint64_t sequence) {
         EmulationLease lease(impl, generation);
         if (!lease.IsActive())
             return;
         command(sequence);
-    });
+    }, drain_safe);
 }
 
 static std::uint64_t SubmitEmulationCommandLocked(const std::shared_ptr<AgentServer::Impl>& impl,
-                                                   EmulationThreadQueue::Command command)
+                                                   EmulationThreadQueue::Command command, bool drain_safe = false)
 {
     if (!impl->started || impl->stopping || !impl->runtime)
         return 0;
     return SubmitEmulationCommandWithState(impl, impl->runtime,
                                             impl->lifecycle_generation.load(),
-                                            std::move(command));
+                                            std::move(command), drain_safe);
 }
 
 static std::uint64_t SubmitEmulationCommand(const std::shared_ptr<AgentServer::Impl>& impl,
@@ -946,7 +995,8 @@ static JsonValue StopReason(const AgentServer::Impl::Session& session)
     if (session.has_last_stop_breakpoint_address) {
         Add(&stop, "address", EncodeMemoryAddress(session.last_stop_breakpoint_address));
     } else if (session.last_stop_kind == "startup" || session.last_stop_kind == "step" ||
-               session.last_stop_kind == "breakpoint") {
+               session.last_stop_kind == "breakpoint" || session.last_stop_kind == "checkpoint" ||
+               session.last_stop_kind == "replay_boundary") {
         JsonValue address = Object();
         Add(&address, "space", String("segmented"));
         std::ostringstream segment;
@@ -1058,6 +1108,7 @@ static bool ValidateStartParams(const JsonValue& params,
                                 const std::string& request_path_base,
                                 std::string* command,
                                 std::vector<std::string>* arguments,
+                                std::string* dos_directory,
                                 std::string* error)
 {
     const JsonValue* target = params.Find("target");
@@ -1066,6 +1117,12 @@ static bool ValidateStartParams(const JsonValue& params,
     if (target == NULL || target->type != JsonType::Object ||
         !GetString(*target, "command", command) || command->empty()) {
         *error = "session.start requires target.command as a non-empty string";
+        return false;
+    }
+    const JsonValue* directory = target->Find("directory");
+    if (directory != NULL && (!GetString(*target, "directory", dos_directory) ||
+                              !ValidLaunchDirectory(*dos_directory))) {
+        *error = "target.directory must be a C-drive-relative DOS 8.3 directory";
         return false;
     }
     if (break_at == NULL || break_at->type != JsonType::String || break_at->text != "entry") {
@@ -1189,6 +1246,7 @@ static std::string Capabilities(const AgentConfig& config)
 {
     JsonValue result = Object();
     Add(&result, "protocol_version", String("1.0"));
+    Add(&result, "target_directory", JsonValue::Bool(!config.test_profile));
 #if C_DEBUG
     Add(&result, "debugger", JsonValue::Bool(true));
 #else
@@ -1201,6 +1259,89 @@ static std::string Capabilities(const AgentConfig& config)
     Add(&trace, "cpu", JsonValue::Bool(false));
 #endif
     Add(&result, "trace", trace);
+    JsonValue replay = Object();
+    Add(&replay, "keyboard_tick_timeline", JsonValue::Bool(!config.test_profile));
+    Add(&replay, "startup_barrier", String(config.startup_barrier ? "shell-prepared-v1" : "disabled"));
+    Add(&replay, "initial_rtc_unix_seconds", config.initial_rtc_unix_seconds < 0 ? JsonValue::Null() : Number(config.initial_rtc_unix_seconds));
+    Add(&replay, "phase", String("pic-tick-after-rebase-before-handlers"));
+    Add(&replay, "layer", String("KEYBOARD_AddKey-attempt"));
+    Add(&replay, "max_events", Number(1024));
+    Add(&replay, "keyboard_stream", JsonValue::Bool(!config.test_profile));
+    Add(&replay, "mapper_control_guard", JsonValue::Bool(!config.test_profile));
+    Add(&replay, "recording_finish_request_v1", JsonValue::Bool(!config.test_profile));
+#if defined(C_SDL2)
+    Add(&replay, "sdl2_host_pointer_guard", JsonValue::Bool(!config.test_profile));
+    Add(&replay, "keyboard_mouse_stream", JsonValue::Bool(!config.test_profile));
+    Add(&replay, "mouse_capture_stream_v2", JsonValue::Bool(!config.test_profile));
+#else
+    Add(&replay, "sdl2_host_pointer_guard", JsonValue::Bool(false));
+    Add(&replay, "keyboard_mouse_stream", JsonValue::Bool(false));
+    Add(&replay, "mouse_capture_stream_v2", JsonValue::Bool(false));
+#endif
+    Add(&replay, "tick_boundary_hold", JsonValue::Bool(!config.test_profile));
+    Add(&replay, "boundary_phase", String("pic-tick-after-handlers"));
+    Add(&replay, "stream_window_events", Number(1024));
+    Add(&replay, "stream_max_coordinate", Number(1000000000));
+    Add(&replay, "checkpoint_continuation", JsonValue::Bool(false));
+    Add(&replay, "whole_machine_qualified", JsonValue::Bool(false));
+    Add(&replay, "selected_dos_exit_boundary", JsonValue::Bool(!config.test_profile));
+    Add(&result, "replay", replay);
+    JsonValue exec = Object();
+    Add(&exec, "events", JsonValue::Bool(!config.test_profile));
+    Add(&exec, "window_capacity", Number(ExecEventWindow::Limit));
+    Add(&exec, "max_read_events", Number(32));
+    Add(&exec, "drain_backpressure", JsonValue::Bool(!config.test_profile));
+    Add(&exec, "complete_dos_effects", JsonValue::Bool(false));
+    Add(&exec, "arbitrary_launch_chain", JsonValue::Bool(false));
+    Add(&result, "dos_exec", exec);
+    JsonValue state_capture = Object();
+    Add(&state_capture, "integer_backing_v1", JsonValue::Bool(!config.test_profile));
+    Add(&state_capture, "module_events_unpaged_v1", JsonValue::Bool(!config.test_profile));
+    Add(&state_capture, "module_events_unpaged_v2", JsonValue::Bool(!config.test_profile));
+#if C_FPU
+    Add(&state_capture, "fp_simd_storage_v1", JsonValue::Bool(!config.test_profile));
+    Add(&state_capture, "instruction_window_fp_simd_v4", JsonValue::Bool(!config.test_profile));
+#else
+    Add(&state_capture, "fp_simd_storage_v1", JsonValue::Bool(false));
+    Add(&state_capture, "instruction_window_fp_simd_v4", JsonValue::Bool(false));
+#endif
+    Add(&state_capture, "physical_backing_bytes_v1", JsonValue::Bool(!config.test_profile));
+    Add(&state_capture, "ram_substitution_v1", JsonValue::Bool(!config.test_profile));
+    Add(&state_capture, "function_boundary_flat32_v1", JsonValue::Bool(!config.test_profile));
+    Add(&state_capture, "function_boundary_effects_flat32_v1", JsonValue::Bool(!config.test_profile));
+    Add(&state_capture, "function_boundary_effects_flat32_v2", JsonValue::Bool(!config.test_profile));
+    Add(&state_capture, "function_boundary_effects_flat32_v3", JsonValue::Bool(!config.test_profile));
+    Add(&state_capture, "function_boundary_effects_flat32_v4", JsonValue::Bool(!config.test_profile));
+    Add(&state_capture, "mouse_int33_v1", JsonValue::Bool(!config.test_profile));
+    Add(&state_capture, "mouse_int33_v2", JsonValue::Bool(!config.test_profile));
+    Add(&state_capture, "raster_submitted_v1", JsonValue::Bool(!config.test_profile));
+    Add(&state_capture, "mixer_rendered_v1", JsonValue::Bool(!config.test_profile));
+    Add(&state_capture, "opl_dbopl_state_v1", JsonValue::Bool(!config.test_profile));
+    Add(&state_capture, "pit_speaker_state_v1", JsonValue::Bool(!config.test_profile));
+    Add(&state_capture, "mixer_isolated_sink_v1", JsonValue::Bool(!config.test_profile));
+    Add(&state_capture, "instruction_window_v1", JsonValue::Bool(!config.test_profile));
+    Add(&state_capture, "instruction_window_access_v1", JsonValue::Bool(!config.test_profile));
+    Add(&state_capture, "instruction_window_interval_v2", JsonValue::Bool(!config.test_profile));
+    Add(&state_capture, "instruction_window_devices_v3", JsonValue::Bool(!config.test_profile));
+    Add(&state_capture, "whole_machine_qualified", JsonValue::Bool(false));
+    Add(&result, "state_capture", state_capture);
+    JsonValue video = Object();
+    Add(&video, "halted_mode13h_hashes", JsonValue::Bool(!config.test_profile));
+    Add(&video, "halted_mode0dh_hashes", JsonValue::Bool(!config.test_profile));
+    Add(&video, "contract", String("vga-mode13h-v1"));
+    JsonValue video_contracts = JsonValue::Array();
+    video_contracts.array.push_back(String("vga-mode13h-v1"));
+    video_contracts.array.push_back(String("vga-mode0dh-v1"));
+    Add(&video, "contracts", video_contracts);
+    Add(&video, "scanout_history", JsonValue::Bool(false));
+    Add(&video, "checkpoint_continuation", JsonValue::Bool(false));
+    Add(&result, "video", video);
+    JsonValue checkpoints = Object();
+    Add(&checkpoints, "experimental_process_local", JsonValue::Bool(!config.test_profile));
+    Add(&checkpoints, "persisted", JsonValue::Bool(false));
+    Add(&checkpoints, "whole_machine_qualified", JsonValue::Bool(false));
+    Add(&checkpoints, "max_handles", Number(2));
+    Add(&result, "checkpoints", checkpoints);
     JsonValue breakpoints = Object();
 #ifdef C_HEAVY_DEBUG
     Add(&breakpoints, "memory_change", JsonValue::Bool(true));
@@ -1283,6 +1424,8 @@ bool AgentServer::Start(const AgentConfig& config, std::string* error)
         OnDebuggerStopped(state, generation, segment, instruction_pointer);
     });
 
+    if (config.startup_barrier) AGENT_ArmStartupBarrier();
+    AGENT_SetInitialRtc(config.initial_rtc_unix_seconds);
     if (!impl->transport->Start(config, [state](const std::string& request) {
             return HandleJsonRpcImpl(state, request);
         }, error)) {
@@ -1291,6 +1434,8 @@ bool AgentServer::Start(const AgentConfig& config, std::string* error)
         impl->started = false;
         impl->stopping = false;
         AGENT_SetDebuggerStopListener(DebuggerStopListener());
+        AGENT_ReleaseStartupBarrier();
+        AGENT_SetInitialRtc(-1);
         return false;
     }
     return true;
@@ -1355,6 +1500,7 @@ void AgentServer::Stop()
     // The callback may already have been copied by the emulation thread. It
     // holds shared state and observes stopping, rather than touching this.
     AGENT_SetDebuggerStopListener(DebuggerStopListener());
+    AGENT_ReleaseStartupBarrier();
     if (transport)
         transport->Stop();
 
@@ -1434,6 +1580,7 @@ std::string AgentServer::HandleJsonRpcImpl(const std::shared_ptr<Impl>& impl, co
 
     if (parsed.method == "session.start") {
         std::string target_command;
+        std::string dos_directory;
         std::vector<std::string> target_arguments;
         std::string validation_error;
         if (impl->session) {
@@ -1480,7 +1627,7 @@ std::string AgentServer::HandleJsonRpcImpl(const std::shared_ptr<Impl>& impl, co
                 return SessionError(parsed.id, kErrorSessionBusy, "Only one session may be active", "SESSION_BUSY", existing);
         }
         if (!ValidateStartParams(parsed.params, impl->config, impl->request_path_base,
-                                 &target_command, &target_arguments, &validation_error))
+                                 &target_command, &target_arguments, &dos_directory, &validation_error))
             return InvalidParams(parsed.id, validation_error);
 
         impl->session.reset(new Impl::Session());
@@ -1527,8 +1674,8 @@ std::string AgentServer::HandleJsonRpcImpl(const std::shared_ptr<Impl>& impl, co
             session.deferred_requests[parsed.id_key] = pending;
 
         const std::string workdir = impl->config.dosbox_workdir;
-        if (SubmitEmulationCommandLocked(impl, [impl, session_id, target_command, target_arguments, workdir](const std::uint64_t) {
-                StartTargetOnEmulationThread(impl, session_id, target_command, target_arguments, workdir);
+        if (SubmitEmulationCommandLocked(impl, [impl, session_id, target_command, target_arguments, workdir, dos_directory](const std::uint64_t) {
+                StartTargetOnEmulationThread(impl, session_id, target_command, target_arguments, workdir, dos_directory);
             }) == 0) {
             session.state = Impl::SessionState::Failed;
             session.failure_message = "Emulation-thread bridge is unavailable";
@@ -1617,6 +1764,19 @@ std::string AgentServer::HandleJsonRpcImpl(const std::shared_ptr<Impl>& impl, co
 
     bool cache_response = true;
 
+    // Nested DOS/BIOS holds require exact-stack resume or host termination, not debugger mutation.
+    if (impl->runtime->ReplayBoundaryHeld() &&
+        parsed.method != "session.status" && parsed.method != "execution.wait" &&
+        parsed.method != "execution.continue" && parsed.method != "state.get_registers" &&
+        parsed.method != "memory.read" && parsed.method != "video.capture" && parsed.method != "replay.control" &&
+        parsed.method != "exec.control" && parsed.method != "state.capture" && parsed.method != "state.substitute") {
+        response = SessionError(parsed.id, kErrorCommandRejected,
+                                "operation is unsafe inside a replay boundary; resume or terminate the host process",
+                                "COMMAND_REJECTED", session);
+        CacheResponse(session, parsed, response);
+        return response;
+    }
+
     if (parsed.method == "session.status") {
         JsonValue result = SessionResult(*session);
         Add(&result, "state", String(StateName(session->state)));
@@ -1633,7 +1793,12 @@ std::string AgentServer::HandleJsonRpcImpl(const std::shared_ptr<Impl>& impl, co
             Add(&result, "last_stop", StopReason(*session));
         response = AGENT_MakeJsonRpcResult(parsed.id, result);
     } else if (parsed.method == "execution.continue") {
-        if (session->state == Impl::SessionState::Running) {
+        if (impl->runtime->ReplayExitHeld()) {
+            // Reject terminal-hold resume before creating an operation or marking the session running.
+            response = SessionError(parsed.id, kErrorCommandRejected,
+                                    "selected DOS process has exited; terminate the host process after collecting evidence",
+                                    "COMMAND_REJECTED", session);
+        } else if (session->state == Impl::SessionState::Running) {
             response = SessionError(parsed.id, kErrorTargetRunning,
                                     "Target is already running", "TARGET_RUNNING", session);
         } else if (session->state == Impl::SessionState::Exited) {
@@ -1754,6 +1919,121 @@ std::string AgentServer::HandleJsonRpcImpl(const std::shared_ptr<Impl>& impl, co
                 }
             }
         }
+    } else if (parsed.method == "replay.control" || parsed.method == "checkpoint.control" || parsed.method == "exec.control" || parsed.method == "state.capture" || parsed.method == "state.substitute") {
+        const bool checkpoint = parsed.method == "checkpoint.control";
+        const bool exec = parsed.method == "exec.control";
+        const bool capture = parsed.method == "state.capture";
+        const bool substitute = parsed.method == "state.substitute";
+        const JsonValue* action_value = parsed.params.Find("action");
+        const std::string action = action_value && action_value->type == JsonType::String ? action_value->text : "";
+        const JsonValue* stream_value = parsed.params.Find("stream");
+        const bool raster_begin = capture && action == "raster-begin";
+        const bool audio_begin = capture && action == "audio-begin";
+        const bool window_arm = capture && (action == "window-arm" || action == "function-arm" || action == "module-arm");
+        const JsonValue* exit_option = parsed.params.Find("stop_on_exit");
+        const bool exit_begin = !capture && !checkpoint && !exec && action == "begin" &&
+                               exit_option && exit_option->type == JsonType::Bool && exit_option->boolean;
+        const bool exec_flow = exec && action == "flow";
+        const bool fenced = substitute || checkpoint || raster_begin || audio_begin || window_arm || exec_flow || (action == "begin" && stream_value && stream_value->type == JsonType::Bool && stream_value->boolean);
+        std::uint64_t expected_revision = 0;
+        if (!parsed.has_id || parsed.id.type == JsonType::Null) {
+            response = InvalidParams(parsed.id, "control mutation requires a request id for safe retries");
+        } else if (substitute && (session->state != Impl::SessionState::Stopped || session->last_stop_kind != "replay_boundary" ||
+                                !session->deferred_requests.empty())) {
+            response = SessionError(parsed.id, kErrorCommandRejected, "substitution requires an idle held replay boundary", "COMMAND_REJECTED", session);
+        } else if (exec_flow && (session->state != Impl::SessionState::Stopped || session->last_stop_kind != "startup")) {
+            response = SessionError(parsed.id, kErrorCommandRejected, "EXEC flow requires the selected executable entry stop", "COMMAND_REJECTED", session);
+        } else if (raster_begin && (session->state != Impl::SessionState::Stopped || session->last_stop_kind != "startup")) {
+            response = SessionError(parsed.id, kErrorCommandRejected, "raster begin requires the selected executable entry stop", "COMMAND_REJECTED", session);
+        } else if (audio_begin && (session->state != Impl::SessionState::Stopped || session->last_stop_kind != "startup")) {
+            response = SessionError(parsed.id, kErrorCommandRejected, "audio begin requires the selected executable entry stop", "COMMAND_REJECTED", session);
+        } else if (window_arm && (session->state != Impl::SessionState::Stopped || session->last_stop_kind != "startup")) {
+            response = SessionError(parsed.id, kErrorCommandRejected, "instruction window arm requires selected executable entry", "COMMAND_REJECTED", session);
+        } else if (exit_begin && (session->state != Impl::SessionState::Stopped || session->last_stop_kind != "startup")) {
+            response = SessionError(parsed.id, kErrorCommandRejected, "stop_on_exit requires the selected executable entry stop", "COMMAND_REJECTED", session);
+        } else if (substitute ? action != "apply" : capture ? (action != "capture" && action != "ram-range" && action != "ram-bytes" && action != "raster-begin" && action != "audio-begin" && action != "window-arm" && action != "window-read" && action != "function-arm" && action != "function-read" && action != "function-bytes" && action != "module-arm" && action != "module-read") :
+                   exec ? (action != "status" && action != "read" && action != "ack" && action != "flow") :
+                   checkpoint ? (action != "save" && action != "restore" && action != "release") :
+                              (action != "begin" && action != "key" && action != "status" && action != "finish" &&
+                               action != "append" && action != "read" && action != "ack" && action != "boundary")) {
+            response = InvalidParams(parsed.id, "unknown control action");
+        } else if ((capture || checkpoint || action == "begin" || action == "finish") && session->state != Impl::SessionState::Stopped) {
+            response = SessionError(parsed.id, kErrorCommandRejected, "checkpoint/begin/finish require a stopped target", "COMMAND_REJECTED", session);
+        } else if (!exec && session->state != Impl::SessionState::Stopped && session->state != Impl::SessionState::Running) {
+            response = SessionError(parsed.id, kErrorCommandRejected, "target is not available", "COMMAND_REJECTED", session);
+        } else if (fenced && !GetRevision(parsed.params.Find("expected_state_revision"), &expected_revision)) {
+            response = InvalidParams(parsed.id, "checkpoint/stream begin requires an unsigned 64-bit expected_state_revision");
+        } else if (fenced && expected_revision != session->state_revision) {
+            // Reject reused mutation IDs after cache eviction to avoid executing twice.
+            response = SessionError(parsed.id, kErrorCommandRejected, "checkpoint state revision changed; do not refresh a retry's fence", "COMMAND_REJECTED", session);
+        } else {
+            const std::shared_ptr<Impl::AdapterOperation> operation(new Impl::AdapterOperation());
+            JsonValue params = parsed.params;
+            if (exec) params.object["action"] = String("exec-" + action);
+            if (capture) params.object["action"] = String("state-" + action);
+            if (substitute) params.object["action"] = String("state-substitute");
+            if (SubmitEmulationCommandLocked(impl, [impl, operation, params, checkpoint, action](const std::uint64_t) {
+                    JsonValue result;
+                    std::string error;
+                    bool success = checkpoint ? impl->runtime->CheckpointCommand(params, &result, &error) :
+                                                impl->runtime->ReplayCommand(params, &result, &error);
+                    RegisterSnapshot registers;
+                    if (success && checkpoint && action == "restore") success = impl->runtime->GetRegisters(&registers, &error);
+                    {
+                        std::lock_guard<std::mutex> operation_lock(operation->mutex);
+                        operation->success = success;
+                        operation->error = error;
+                        operation->replay_result = result;
+                        operation->registers = registers;
+                        operation->done = true;
+                    }
+                    operation->completed.notify_all();
+                }, ExecDrainSafeAction(parsed.method, action)) == 0) {
+                response = Error(parsed.id, kErrorCommandRejected, "Emulation bridge is unavailable", "COMMAND_REJECTED");
+            } else {
+                const JsonValue response_id = parsed.id;
+                const std::string session_id = session->id;
+                Impl::DeferredRequest pending;
+                pending.request = parsed;
+                pending.fingerprint = parsed.fingerprint;
+                pending.wait = [operation](const std::uint32_t timeout_ms) {
+                    std::unique_lock<std::mutex> operation_lock(operation->mutex);
+                    return operation->completed.wait_for(operation_lock, std::chrono::milliseconds(timeout_ms),
+                                                          [operation]() { return operation->done; });
+                };
+                pending.finish = [impl, session_id, response_id, operation, action, checkpoint, capture]() {
+                    if (!operation->success)
+                        return Error(response_id, kErrorCommandRejected, operation->error, "COMMAND_REJECTED");
+                    if (!impl->session || impl->session->id != session_id)
+                        return Error(response_id, kErrorSessionNotFound, "Session was not found", "SESSION_NOT_FOUND");
+                    if (!capture && action != "status" && action != "read") ++impl->session->state_revision;
+                    if (checkpoint && action == "restore") {
+                        impl->session->last_stop_kind = "checkpoint";
+                        impl->session->last_stop_breakpoint_id.clear();
+                        impl->session->has_last_stop_breakpoint_address = false;
+                        impl->session->last_stop_segment = operation->registers.cs;
+                        impl->session->last_stop_instruction_pointer = operation->registers.instruction_pointer;
+                    }
+                    JsonValue result = operation->replay_result;
+                    Add(&result, "session_id", String(session_id));
+                    Add(&result, "state_revision", Number(impl->session->state_revision));
+                    return AGENT_MakeJsonRpcResult(response_id, result);
+                };
+                session->deferred_requests[parsed.id_key] = pending;
+                lock.unlock();
+                const bool completed = pending.wait(impl->config.request_timeout_ms);
+                lock.lock();
+                if (!RebindSessionAfterWait(impl, session_id, &session, &response, parsed.id)) return response;
+                if (!completed) {
+                    cache_response = false;
+                    response = Error(parsed.id, kErrorOperationTimeout, "Timed out in control mutation; retry the same request id", "OPERATION_TIMEOUT");
+                } else {
+                    auto deferred = session->deferred_requests.find(parsed.id_key);
+                    response = deferred->second.finish();
+                    session->deferred_requests.erase(deferred);
+                }
+            }
+        }
     } else if (parsed.method == "state.get_registers") {
         if (session->state == Impl::SessionState::Running) {
             response = SessionError(parsed.id, kErrorTargetRunning,
@@ -1797,6 +2077,69 @@ std::string AgentServer::HandleJsonRpcImpl(const std::shared_ptr<Impl>& impl, co
                                      "COMMAND_REJECTED");
                 } else {
                     response = AGENT_MakeJsonRpcResult(parsed.id, RegistersResult(operation->registers, *session));
+                }
+            }
+        }
+    } else if (parsed.method == "video.capture") {
+        const JsonValue* contract = parsed.params.Find("contract");
+        if (!contract || contract->type != JsonType::String ||
+            (contract->text != "vga-mode13h-v1" && contract->text != "vga-mode0dh-v1")) {
+            response = InvalidParams(parsed.id, "video.capture requires contract vga-mode13h-v1 or vga-mode0dh-v1");
+        } else if (session->state != Impl::SessionState::Stopped) {
+            response = SessionError(parsed.id, kErrorCommandRejected, "video.capture requires a stopped target", "COMMAND_REJECTED", session);
+        } else {
+            const std::shared_ptr<Impl::AdapterOperation> operation(new Impl::AdapterOperation());
+            const std::string session_id = session->id;
+            const std::string requested_contract = contract->text;
+            if (SubmitEmulationCommandLocked(impl, [impl, operation, requested_contract](const std::uint64_t) {
+                    VideoSnapshot video;
+                    std::string error;
+                    bool success = impl->runtime->CaptureVideo(&video, &error);
+                    const JsonValue* actual_contract = video.metadata.Find("contract");
+                    if (success && (!actual_contract || actual_contract->type != JsonType::String || actual_contract->text != requested_contract)) {
+                        success = false;
+                        error = "requested video contract does not match the native layout";
+                    }
+                    {
+                        std::lock_guard<std::mutex> operation_lock(operation->mutex);
+                        operation->success = success; operation->error = error;
+                        operation->video = std::move(video); operation->done = true;
+                    }
+                    operation->completed.notify_all();
+                }) == 0) {
+                response = Error(parsed.id, kErrorCapabilityUnavailable, "Emulation bridge unavailable", "COMMAND_REJECTED");
+            } else {
+                std::unique_lock<std::mutex> operation_lock(operation->mutex);
+                lock.unlock();
+                const bool completed = operation->completed.wait_for(operation_lock,
+                        std::chrono::milliseconds(impl->config.request_timeout_ms), [operation]() { return operation->done; });
+                lock.lock();
+                if (!RebindSessionAfterWait(impl, session_id, &session, &response, parsed.id)) return response;
+                if (!completed) {
+                    response = Error(parsed.id, kErrorOperationTimeout, "Timed out in video.capture", "OPERATION_TIMEOUT");
+                } else if (!operation->success) {
+                    response = Error(parsed.id, kErrorCapabilityUnavailable, operation->error, "COMMAND_REJECTED");
+                } else {
+                    JsonValue result = operation->video.metadata;
+                    const auto hashed = [](const std::vector<std::uint8_t>& bytes) {
+                        JsonValue value = Object();
+                        Add(&value, "byte_count", Number(bytes.size()));
+                        Add(&value, "sha256", String(Sha256Hex(bytes)));
+                        return value;
+                    };
+                    JsonValue buffers = Object();
+                    Add(&buffers, "indexed", hashed(operation->video.indexed));
+                    Add(&buffers, "palette", hashed(operation->video.palette));
+                    if (!operation->video.effective_palette.empty())
+                        Add(&buffers, "effective_palette", hashed(operation->video.effective_palette));
+                    Add(&buffers, "latches", hashed(operation->video.latches));
+                    JsonValue planes = JsonValue::Array();
+                    for (unsigned p = 0; p < 4; ++p) planes.array.push_back(hashed(operation->video.planes[p]));
+                    Add(&buffers, "planes", planes);
+                    Add(&result, "buffers", buffers);
+                    Add(&result, "session_id", String(session->id));
+                    Add(&result, "state_revision", Number(session->state_revision));
+                    response = AGENT_MakeJsonRpcResult(parsed.id, result);
                 }
             }
         }
@@ -2853,7 +3196,8 @@ void AgentServer::StartTargetOnEmulationThread(const std::shared_ptr<Impl>& impl
                                                const std::string& session_id,
                                                const std::string& target_command,
                                                const std::vector<std::string>& target_arguments,
-                                               const std::string& workdir)
+                                               const std::string& workdir,
+                                               const std::string& dos_directory)
 {
     AgentRuntime& adapter = *impl->runtime;
     if (!adapter.IsReadyForTargetStart()) {
@@ -2872,8 +3216,8 @@ void AgentServer::StartTargetOnEmulationThread(const std::shared_ptr<Impl>& impl
             ++impl->session->startup_retry_count;
         }
         if (SubmitEmulationCommandAfter(impl, 10,
-                                        [impl, session_id, target_command, target_arguments, workdir](const std::uint64_t) {
-                StartTargetOnEmulationThread(impl, session_id, target_command, target_arguments, workdir);
+                                        [impl, session_id, target_command, target_arguments, workdir, dos_directory](const std::uint64_t) {
+                StartTargetOnEmulationThread(impl, session_id, target_command, target_arguments, workdir, dos_directory);
             }) != 0) {
             return;
         }
@@ -2905,7 +3249,7 @@ void AgentServer::StartTargetOnEmulationThread(const std::shared_ptr<Impl>& impl
     }
 
     std::string launch_error;
-    if (adapter.StartTargetAtEntry(target_command, target_arguments, workdir, &launch_error)) {
+    if (adapter.StartTargetAtEntry(target_command, target_arguments, workdir, dos_directory, &launch_error)) {
         std::lock_guard<std::mutex> command_lock(impl->mutex);
         if (impl->session && impl->session->id == session_id &&
             impl->session->state == Impl::SessionState::Starting) {
@@ -3030,6 +3374,7 @@ void AgentServer::OnDebuggerStopped(const std::shared_ptr<Impl>& impl,
         return;
 
     const bool startup = impl->session->state == Impl::SessionState::Starting;
+    if (startup && !impl->config.test_profile) AGENT_ExecEntry(segment, instruction_pointer);
     const bool trace_completed = impl->session->trace.IsActive() && trace_read && !native_trace_active;
     if (impl->session->trace.IsActive() && trace_read) {
         impl->session->trace.Merge(trace_samples);
@@ -3038,9 +3383,9 @@ void AgentServer::OnDebuggerStopped(const std::shared_ptr<Impl>& impl,
     }
     impl->session->state = Impl::SessionState::Stopped;
     impl->session->last_stop_kind = startup ? "startup" :
-            (native_breakpoint != 0 ? "breakpoint" :
+            (adapter.ReplayBoundaryHeld() ? (adapter.ReplayExitHeld() ? "program_exit" : "replay_boundary") : (native_breakpoint != 0 ? "breakpoint" :
              (!impl->session->pending_stop_kind.empty() ? impl->session->pending_stop_kind :
-              (trace_completed ? "pause" : "breakpoint")));
+              (trace_completed ? "pause" : "breakpoint"))));
     impl->session->last_stop_segment = segment;
     impl->session->last_stop_instruction_pointer = instruction_pointer;
     impl->session->last_stop_breakpoint_id.clear();

@@ -38,6 +38,61 @@
 
 FPU fpu;
 
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+#include "agent/fpu_capture.h"
+#include "agent/audio_capture.h"
+#endif
+
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+extern bool enable_fpu;
+namespace dosbox_agent {
+bool AGENT_FpuCapture(JsonValue* result, std::string* error) {
+    FpuBytes registers, control, simd, simd_control, aliases, fallback, shadow;
+    if (!FpuRegvalidBytes(fpu, registers, control, simd, simd_control) ||
+        !FpuAliasBytes(fpu, reg_mmx, 8, aliases) || !FpuAliasBytes(fpu, lookupRMregMM, 256, aliases)) {
+        if (error) *error = "invalid FPU storage or MMX register aliases";
+        return false;
+    }
+#if !defined(HAS_LONG_DOUBLE)
+    if (!FpuRegvalidFallbackBytes(fpu, fallback)) return false;
+#endif
+    auto value = JsonValue::Object(), domains = JsonValue::Object();
+    const auto append = [&domains](const char* name, const FpuBytes& bytes) {
+        auto row = JsonValue::Object();
+        row.object["bytes"] = JsonValue::Number(std::to_string(bytes.bytes.size()));
+        row.object["sha256"] = JsonValue::String(AGENT_Sha256Hex(bytes.bytes));
+        domains.object[name] = std::move(row);
+    };
+    append("x87-registers", registers); append("x87-control", control);
+    append("simd-registers", simd); append("simd-control", simd_control);
+    append("mmx-bindings", aliases); append("binary64-fallback", fallback); append("integer-shadow", shadow);
+    value.object["contract"] = JsonValue::String(FpuStorageContract);
+#if C_FPU_X86
+    value.object["implementation"] = JsonValue::String("x86-asm-regvalid-v2");
+#elif defined(HAS_LONG_DOUBLE)
+    value.object["implementation"] = JsonValue::String("host-long-double-regvalid-v2");
+#else
+    value.object["implementation"] = JsonValue::String("host-double-regvalid-v2");
+#endif
+    value.object["core_scope"] = JsonValue::String("normal-core-storage-v1");
+    value.object["fpu_enabled"] = JsonValue::Bool(enable_fpu);
+    value.object["cpu_architecture"] = JsonValue::Number(std::to_string(CPU_ArchitectureType));
+    value.object["fpu_architecture"] = JsonValue::Number(std::to_string(FPU_ArchitectureType));
+    value.object["binary64_storage"] = JsonValue::Bool(!fallback.bytes.empty());
+    value.object["integer_shadow"] = JsonValue::Bool(!shadow.bytes.empty());
+    value.object["physical_slots"] = JsonValue::Number("9");
+    value.object["xmm_registers"] = JsonValue::Number("8");
+    value.object["whole_cpu_qualified"] = JsonValue::Bool(false);
+    value.object["host_fp_environment_qualified"] = JsonValue::Bool(false);
+    value.object["restorable"] = JsonValue::Bool(false);
+    value.object["domains"] = std::move(domains);
+    *result = std::move(value);
+    return true;
+}
+}
+#endif
+
+
 namespace {
 
 constexpr double X87_TRIG_ARG_LIMIT = 0x1p63; // 2^63

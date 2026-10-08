@@ -41,6 +41,9 @@
 #include "menudef.h"
 #include "video.h"
 #include "keyboard.h"
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+#include "agent/replay_timeline.h"
+#endif
 #include "mouse.h"
 #include "pic.h"
 #include "control.h"
@@ -3027,7 +3030,10 @@ public:
                 notify_button->SetInvert(yesno);
         }
         else {
-            KEYBOARD_AddKey(key,yesno);
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+            if (!dosbox_agent::AGENT_ReplayHostKey(key, yesno))
+#endif
+                KEYBOARD_AddKey(key,yesno);
         }
 
         active=yesno;
@@ -3057,10 +3063,7 @@ public:
         notify_button=NULL;
 	}
 	void Active(bool yesno) override {
-		if (yesno)
-			Mouse_ButtonPressed(button);
-		else
-			Mouse_ButtonReleased(button);
+		Mouse_HostButton(button, yesno);
 	}
     //! \brief Associate this object with a text button in the mapper UI
     void notifybutton(CTextButton *n) {
@@ -3263,6 +3266,9 @@ public:
                 notify_button->SetInvert(yesno);
         }
         else {
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+            if (dosbox_agent::AGENT_ReplayHostControl(yesno, !strcmp(GetName(), "hand_capmouse"))) return;
+#endif
             (*handler)(yesno);
         }
 

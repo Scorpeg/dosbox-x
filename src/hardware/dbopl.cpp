@@ -1535,6 +1535,44 @@ void Handler::Init( Bitu rate ) {
 }
 
 // save state support
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+bool Handler::AgentOplCapture(dosbox_agent::OplBytes& state, dosbox_agent::OplBytes& tables) const {
+#if (DBOPL_WAVE == WAVE_TABLEMUL)
+	const auto volume_id = [](VolumeHandler value) {
+		for (int i = 0; i < 5; ++i) if (value == VolumeHandlerTable[i]) return i;
+		return -1;
+	};
+	const auto synth_id = [](SynthHandler value) {
+		const SynthHandler identities[] = {&Channel::BlockTemplate<sm3FMFM>, &Channel::BlockTemplate<sm3AMFM>,
+			&Channel::BlockTemplate<sm3FMAM>, &Channel::BlockTemplate<sm3AMAM>, &Channel::BlockTemplate<sm3AM>,
+			&Channel::BlockTemplate<sm3FM>, &Channel::BlockTemplate<sm2AM>, &Channel::BlockTemplate<sm2FM>,
+			&Channel::BlockTemplate<sm3Percussion>, &Channel::BlockTemplate<sm2Percussion>};
+		for (int i = 0; i < 10; ++i) if (value == identities[i]) return i;
+		return -1;
+	};
+	const auto wave_id = [](const int16_t* value) {
+		if (!value) return 65535;
+		// Range-check unknown pointers before subtraction or dereference.
+		const auto address = reinterpret_cast<std::uintptr_t>(value);
+		const auto base = reinterpret_cast<std::uintptr_t>(WaveTable);
+		if (address < base || address - base >= sizeof(WaveTable) || (address - base) % sizeof(int16_t)) return -1;
+		return static_cast<int>((address - base) / sizeof(int16_t));
+	};
+	if (!doneTables || !dosbox_agent::OplDboplBytes(chip, volume_id, synth_id, wave_id, state)) return false;
+	tables.u8(doneTables);
+	for (auto v : WaveTable) tables.u16(v);
+	for (auto v : MulTable) tables.u16(v);
+	for (auto v : KslTable) tables.u8(v);
+	for (auto v : TremoloTable) tables.u8(v);
+	for (auto v : ChanOffsetTable) tables.u16(v);
+	for (auto v : OpOffsetTable) tables.u16(v);
+	return tables.valid;
+#else
+	(void)state; (void)tables; return false;
+#endif
+}
+#endif
+
 void Handler::SaveState( std::ostream& stream )
 {
 	const char pod_name[32] = "DBOPL";

@@ -64,6 +64,9 @@
 #include "cpu.h"
 #include "ide.h"
 #include "callback.h"
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+#include "agent/callback_observer.h"
+#endif
 #include "inout.h"
 #include "mixer.h"
 #include "timer.h"
@@ -493,7 +496,14 @@ static Bitu Normal_Loop(void) {
                     last_callback = (unsigned int)ret;
 
                     dosbox_allow_nonrecursive_page_fault = false;
-                    Bitu blah = (*CallBack_Handlers[ret])();
+                    const CallBack_Handler handler = CallBack_Handlers[ret];
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+                    dosbox_agent::EffectCallbackScope callback_effect((unsigned)ret, handler);
+#endif
+                    Bitu blah = (*handler)();
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+                    callback_effect.Returned(blah);
+#endif
                     dosbox_allow_nonrecursive_page_fault = saved_allow;
 
                     last_callback = p_last_callback;
@@ -3521,6 +3531,10 @@ void DOSBOX_SetupConfigSections(void) {
     Pbool->SetBasic(true);
 
     secprop=control->AddSection_prop("mixer",&Null_Init);
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+    Pbool = secprop->Add_bool("isolated output",Property::Changeable::OnlyAtStart,false);
+    Pbool->Set_help("Experimental fixed emulated mixer with a bounded host-only playback queue. Requires nosound=false and SDL2. Host sink is selected separately; no complete audio-state qualification.");
+#endif
     Pbool = secprop->Add_bool("nosound",Property::Changeable::OnlyAtStart,false);
     Pbool->Set_help("Enable silent mode, sound is still emulated though.");
     Pbool->SetBasic(true);

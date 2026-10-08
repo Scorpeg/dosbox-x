@@ -98,17 +98,19 @@ static struct {
 	Bitu used;
 } spkr;
 
+// File scope allows passive capture without changing the former static's lifetime.
+static bool spkr_previous_output_level = false;
+
 inline static void AddDelayEntry(pic_tickindex_t index, bool new_output_level) {
 #ifdef SPKR_DEBUGGING
 	if (index < 0 || index > 1) {
 		LOG_MSG("AddDelayEntry: index out of range %f at %f", index, PIC_FullIndex());
 	}
 #endif
-	static bool previous_output_level = 0;
-	if (new_output_level == previous_output_level) {
+	if (new_output_level == spkr_previous_output_level) {
 		return;
 	}
-	previous_output_level = new_output_level;
+	spkr_previous_output_level = new_output_level;
 	if (spkr.used == SPKR_ENTRIES) {
         LOG(LOG_MISC,LOG_WARN)("PC speaker delay entry queue overrun");
 		return;
@@ -780,6 +782,51 @@ void PCSPEAKER_Init() {
 	AddExitFunction(AddExitFunctionFuncPair(PCSPEAKER_ShutDown),true);
 	AddVMEventFunction(VM_EVENT_RESET,AddVMEventFunctionFuncPair(PCSPEAKER_OnReset));
 }
+
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+#include "agent/speaker_capture.h"
+#include "agent/opl_capture.h"
+#include "agent/audio_capture.h"
+namespace dosbox_agent {
+bool AGENT_SpeakerCapture(JsonValue* result, std::string* error) {
+    const auto reject = [error](const char* why) { if (error) *error = why; return false; };
+    if (IS_PC98_ARCH || !test || !spkr.chan || spkr.chan->handler != PCSPEAKER_CallBack ||
+        !spkr.chan->name || std::string(spkr.chan->name) != "SPKR")
+        return reject("speaker state requires an active IBM-PC PIT/speaker channel");
+    SpeakerBytes pit_bytes, state, queue;
+    OplBytes channel;
+    if (!AGENT_PitStorage(pit_bytes) ||
+        !SpeakerStorageBytes(spkr, pit_raw_clock_gate_enabled, spkr_previous_output_level,
+                             AGENT_SpeakerPort61(), SPKR_SPEED, state, queue) ||
+        !OplMixerBytes(*spkr.chan, channel)) return reject("unsupported or inconsistent PIT/speaker storage");
+    auto value = JsonValue::Object(), domains = JsonValue::Object();
+    const auto append = [&domains](const char* name, const std::vector<std::uint8_t>& bytes) {
+        auto domain = JsonValue::Object();
+        domain.object["bytes"] = JsonValue::Number(std::to_string(bytes.size()));
+        domain.object["sha256"] = JsonValue::String(AGENT_Sha256Hex(bytes));
+        domains.object[name] = domain;
+    };
+    append("pit", pit_bytes.bytes); append("speaker", state.bytes);
+    append("queue", queue.bytes); append("channel", channel.bytes);
+    value.object["contract"] = JsonValue::String("pit-speaker-state-v1");
+    value.object["implementation"] = JsonValue::String("dosbox-pit-speaker-v1");
+    value.object["real_encoding"] = JsonValue::String("binary-normalized-128-v1");
+    value.object["real_precision"] = JsonValue::Number(std::to_string(std::numeric_limits<pic_tickindex_t>::digits));
+    value.object["pit_channels"] = JsonValue::Number("3");
+    value.object["pit_clock_hz"] = JsonValue::Number(std::to_string(PIT_TICK_RATE));
+    value.object["queue_entries"] = JsonValue::Number(std::to_string(spkr.used));
+    value.object["queue_capacity"] = JsonValue::Number(std::to_string(SPKR_ENTRIES));
+    value.object["device_rate"] = JsonValue::Number(std::to_string(spkr.rate));
+    value.object["rate_numerator"] = JsonValue::Number(std::to_string(spkr.chan->freq_n));
+    value.object["rate_denominator"] = JsonValue::Number(std::to_string(spkr.chan->freq_d_orig));
+    value.object["whole_audio_qualified"] = JsonValue::Bool(false);
+    value.object["restorable"] = JsonValue::Bool(false);
+    value.object["domains"] = domains;
+    *result = value;
+    return true;
+}
+}
+#endif
 
 // save state support
 void POD_Save_PCSpeaker( std::ostream& stream )

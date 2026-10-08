@@ -26,11 +26,17 @@
 #include "setup.h"
 #include "pic.h"
 #include "hardware.h"
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+#include "agent/opl_capture.h"
+#endif
 
 
 namespace Adlib {
 
 class Timer {
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+	friend struct dosbox_agent::OplCaptureAccess;
+#endif
 	//Rounded down start time
 	double start = 0;
 	//Time when you overflow
@@ -147,6 +153,9 @@ typedef enum {
 
 class Handler {
 public:
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+	virtual bool AgentOplCapture(dosbox_agent::OplBytes&, dosbox_agent::OplBytes&) const { return false; }
+#endif
 	//Write an address to a chip, returns the address the chip sets
 	virtual uint32_t WriteAddr( uint32_t port, uint8_t val ) = 0;
 	//Write to a specific register in the chip
@@ -173,6 +182,9 @@ typedef uint8_t RegisterCache[512];
 class Capture;
 
 class Module: public Module_base {
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+	friend struct dosbox_agent::OplCaptureAccess;
+#endif
 	IO_ReadHandleObject ReadHandler[12];
 	IO_WriteHandleObject WriteHandler[12];
 	MixerObject mixerObject;

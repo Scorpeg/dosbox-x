@@ -6,6 +6,7 @@ import ctypes
 from ctypes import wintypes
 import json
 import os
+import socket
 from pathlib import Path
 import time
 from collections.abc import Mapping
@@ -170,12 +171,60 @@ class NamedPipeTransport:
         self._handle = None
 
 
+class UnixSocketTransport:
+    """One bounded UTF-8 JSON-lines exchange per Unix-domain connection."""
+
+    def __init__(self, endpoint: str) -> None:
+        self._endpoint = endpoint
+
+    def request(self, payload: str, timeout_ms: int, max_message_bytes: int) -> str:
+        encoded = payload.encode("utf-8")
+        if len(encoded) > max_message_bytes:
+            raise AgentProtocolError("request exceeds configured max_message_bytes")
+        deadline = time.monotonic() + timeout_ms / 1000
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+                def remaining() -> float:
+                    value = deadline - time.monotonic()
+                    if value <= 0:
+                        raise TimeoutError("Unix-socket request deadline exceeded")
+                    return value
+
+                connection.settimeout(remaining())
+                connection.connect(self._endpoint)
+                connection.settimeout(remaining())
+                connection.sendall(encoded + b"\n")
+                response = bytearray()
+                while True:
+                    connection.settimeout(remaining())
+                    chunk = connection.recv(min(4096, max_message_bytes + 1 - len(response)))
+                    if not chunk:
+                        raise AgentConnectionError("Unix socket closed before a complete response")
+                    response.extend(chunk)
+                    newline = response.find(b"\n")
+                    if newline >= 0:
+                        if newline != len(response) - 1:
+                            raise AgentProtocolError("unexpected data after Unix-socket response")
+                        try:
+                            return bytes(response[:newline]).decode("utf-8")
+                        except UnicodeDecodeError as error:
+                            raise AgentProtocolError("response is not UTF-8") from error
+                    if len(response) > max_message_bytes:
+                        raise AgentProtocolError("response exceeds configured max_message_bytes")
+        except OSError as error:
+            raise AgentConnectionError(f"Unix-socket request failed: {error}") from error
+
+    def close(self) -> None:
+        pass
+
+
 class AgentClient:
     def __init__(self, config: AgentConfig, transport: RpcTransport | None = None) -> None:
-        if config.transport != "named_pipe":
+        if config.transport not in ("named_pipe", "unix_socket"):
             raise ValueError(f"unsupported configured transport: {config.transport}")
         self.config = config
-        self._transport: RpcTransport = transport or NamedPipeTransport(config.endpoint)
+        transport_class = NamedPipeTransport if config.transport == "named_pipe" else UnixSocketTransport
+        self._transport: RpcTransport = transport or transport_class(config.endpoint)
         self._next_request_id = 1
 
     @classmethod
@@ -237,7 +286,7 @@ class AgentClient:
         return self.call("agent.capabilities", request_id=request_id)
 
     def start(self, command: str, arguments: tuple[str, ...] | list[str] = (), *, mount_path: str | Path | None = None,
-              request_id: str | None = None) -> Session:
+              request_id: str | None = None, directory: str | None = None) -> Session:
         if not command:
             raise ValueError("command must not be empty")
         target_arguments = list(arguments)
@@ -245,7 +294,7 @@ class AgentClient:
             raise ValueError("arguments must contain only strings")
         workdir = Path(mount_path) if mount_path is not None else self.config.dosbox_workdir
         result = self.call("session.start", {
-            "target": {"command": command, "arguments": target_arguments},
+            "target": {"command": command, "arguments": target_arguments, **({"directory": directory} if directory is not None else {})},
             "mounts": [{"drive": "C", "host_path": str(workdir)}],
             "break_at": "entry",
         }, request_id)
@@ -439,7 +488,7 @@ def load_config(path: str | Path) -> AgentConfig:
         "transport", "endpoint", "dosbox_executable", "dosbox_workdir", "request_timeout_ms",
         "max_message_bytes", "max_memory_read_bytes", "max_trace_events",
     }
-    optional = {"profile"}
+    optional = {"profile", "startup_barrier", "initial_rtc_unix_seconds"}
     missing = required.difference(values)
     unexpected = set(values).difference(required | optional)
     if missing or unexpected:
@@ -450,9 +499,14 @@ def load_config(path: str | Path) -> AgentConfig:
             details.append("unexpected=" + ",".join(sorted(unexpected)))
         raise ValueError("invalid agent config: " + " ".join(details))
     transport = values["transport"]
-    if transport != "named_pipe":
-        raise ValueError("only transport=named_pipe is supported by the Python v1 client")
+    if transport not in ("named_pipe", "unix_socket"):
+        raise ValueError("transport must be named_pipe or unix_socket")
+    if values.get("startup_barrier", "false") not in {"true", "false"}:
+        raise ValueError("startup_barrier must be true or false")
     profile = values.get("profile", "production")
+    rtc = values.get("initial_rtc_unix_seconds")
+    if rtc is not None and (not rtc.isascii() or not rtc.isdecimal() or not 1 <= int(rtc) <= 2147483647):
+        raise ValueError("initial_rtc_unix_seconds must be between 1 and 2147483647")
     if profile not in {"production", "test"}:
         raise ValueError("profile must be production or test")
     if profile == "production":
@@ -477,6 +531,8 @@ def load_config(path: str | Path) -> AgentConfig:
         max_memory_read_bytes=positive("max_memory_read_bytes"),
         max_trace_events=positive("max_trace_events"),
         test_profile=profile == "test",
+        startup_barrier=values.get("startup_barrier", "false") == "true",
+        initial_rtc_unix_seconds=int(rtc) if rtc is not None else None,
     )
 
 

@@ -30,6 +30,9 @@
 #include "control.h"
 #include "logging.h"
 #include "pic.h"
+#if C_DEBUG && defined(C_DOSBOX_AGENT)
+#include "agent/function_effects.h"
+#endif
 
 // TODO: #ifdef FPU...
 #include "fpu.h"
@@ -900,6 +903,18 @@ public:
 
 TaskStateSegment cpu_tss;
 
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+#include "agent/state_capture.h"
+dosbox_agent::JsonValue dosbox_agent::AGENT_CpuTaskStorage() {
+    JsonValue result = JsonValue::Object();
+#define T(field) result.object[#field] = JsonValue::Number(std::to_string(cpu_tss.field))
+    T(selector); T(base); T(limit); T(is386); T(valid);
+    T(desc.saved.fill[0]); T(desc.saved.fill[1]);
+#undef T
+    return result;
+}
+#endif
+
 enum TSwitchType {
 	TSwitch_JMP,TSwitch_CALL_INT,TSwitch_IRET
 };
@@ -1200,6 +1215,9 @@ void CPU_Exception(Bitu which,Bitu error ) {
 
 uint8_t lastint;
 void CPU_Interrupt(Bitu num,Bitu type,uint32_t oldeip) {
+#if C_DEBUG && defined(C_DOSBOX_AGENT)
+    dosbox_agent::EffectTransitionScope effect("cpu-interrupt", num, type, oldeip);
+#endif
     if (num == EXCEPTION_DB && (type&CPU_INT_EXCEPTION) == 0) {
       CPU_DebugException(0,oldeip); // DR6 bits need updating
       return;
@@ -1509,6 +1527,9 @@ do_interrupt:
  *      Make sure this code emulates that bug. Some buggy games might rely on that. */
 
 void CPU_IRET(bool use32,uint32_t oldeip) {
+#if C_DEBUG && defined(C_DOSBOX_AGENT)
+    dosbox_agent::EffectTransitionScope effect("cpu-iret", 0, 0, oldeip, use32);
+#endif
 	uint32_t orig_esp = reg_esp;
 
 	/* x86 CPUs consider IRET the completion of an NMI, no matter where it happens */

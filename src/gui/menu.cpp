@@ -1783,6 +1783,17 @@ void ConstructMenu(void) {
     mainMenu.displaylist_clear(DOSBoxMenu::unassigned_item_handle);
     separator_alloc = 0;
 
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT) && defined(C_SDL2)
+    // Expose recorder controls, not unrecorded CPU/reset/device actions.
+    if (static_cast<Section_prop *>(control->GetSection("sdl"))->Get_bool("recording controls")) {
+        if (!mainMenu.item_exists("agent_stop_recording"))
+            mainMenu.alloc_item(DOSBoxMenu::item_type_id, "agent_stop_recording").set_text("Stop recording");
+        mainMenu.displaylist_append(DOSBoxMenu::unassigned_item_handle,
+                                   mainMenu.get_item_id_by_name("agent_stop_recording"));
+        return;
+    }
+#endif
+
     /* top level */
     for (size_t i=0;def_menu__toplevel[i] != NULL;i++)
         mainMenu.displaylist_append(DOSBoxMenu::unassigned_item_handle,mainMenu.get_item_id_by_name(def_menu__toplevel[i]));

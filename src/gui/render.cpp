@@ -27,6 +27,9 @@
 #include "logging.h"
 #include "video.h"
 #include "render.h"
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+#include "agent/raster_stream.h"
+#endif
 #include "setup.h"
 #include "control.h"
 #include "mapper.h"
@@ -97,6 +100,14 @@ int                                     aspect_ratio_x = 0;
 int                                     aspect_ratio_y = 0;
 Bitu                                    last_gfx_flags = 0;
 ScalerLineHandler_t                     RENDER_DrawLine;
+
+void RENDER_SubmitLine(const void* source) {
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+    dosbox_agent::AGENT_RasterLine(source, render.src.width, render.src.height, render.src.bpp,
+        reinterpret_cast<const uint8_t*>(render.pal.rgb), sizeof(render.pal.rgb[0]), GFX_Rmask, GFX_Gmask, GFX_Bmask);
+#endif
+    RENDER_DrawLine(source);
+}
 
 uint32_t                                GFX_palette32bpp[256] = {0};
 
@@ -397,6 +408,12 @@ static void RENDER_ClearCacheHandler(const void * src) {
 extern void GFX_SetTitle(int32_t cycles, int frameskip, Bits timing, bool paused);
 
 bool RENDER_StartUpdate(void) {
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+    struct RasterStartAudit {
+        bool accepted = false;
+        ~RasterStartAudit() { dosbox_agent::AGENT_RasterStart(accepted, render.src.width, render.src.height, render.src.bpp); }
+    } raster_audit;
+#endif
 
     if (GCC_UNLIKELY(render.updating))
         return false;
@@ -446,6 +463,9 @@ bool RENDER_StartUpdate(void) {
         }
     }
     render.updating = true;
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+    raster_audit.accepted = true;
+#endif
     return true;
 }
 
@@ -482,6 +502,10 @@ void RENDER_EndUpdate( bool abort ) {
 
     if (!abort && render.active && RENDER_DrawLine == RENDER_ClearCacheHandler)
         render.scale.clearCache = false;
+
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+    dosbox_agent::AGENT_RasterEnd(abort);
+#endif
 
     RENDER_DrawLine = RENDER_EmptyLineHandler;
     if (render.disablerender) {

@@ -21,6 +21,9 @@
 #include <math.h>
 
 #include "dosbox.h"
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+#include "agent/agent_bridge.h"
+#endif
 #include "timer.h"
 #include "cpu.h"
 #include "pic.h"
@@ -602,7 +605,12 @@ void CMOS_Reset(Section* sec) {
 void CMOS_Init() {
     LOG(LOG_MISC,LOG_DEBUG)("Initializing CMOS/RTC");
 
-    cmos_sync_time(time(NULL));
+    time_t initial_time = time(NULL);
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+    if (dosbox_agent::AGENT_InitialRtc() >= 0)
+        initial_time = static_cast<time_t>(dosbox_agent::AGENT_InitialRtc());
+#endif
+    cmos_sync_time(initial_time);
 
     AddExitFunction(AddExitFunctionFuncPair(CMOS_Destroy),true);
     AddVMEventFunction(VM_EVENT_RESET,AddVMEventFunctionFuncPair(CMOS_Reset));
@@ -610,6 +618,17 @@ void CMOS_Init() {
 
 // save state support
 void *cmos_timerevent_PIC_Event = (void*)((uintptr_t)cmos_timerevent);
+
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+void AGENT_SaveCmos(std::ostream& stream) {
+    WRITE_POD(&cmos, cmos); WRITE_POD(&cmos_sync_flag, cmos_sync_flag);
+    WRITE_POD(&cmos_sync_sec, cmos_sync_sec); WRITE_POD(&cmos_sync_min, cmos_sync_min); WRITE_POD(&cmos_sync_hour, cmos_sync_hour);
+}
+void AGENT_LoadCmos(std::istream& stream) {
+    READ_POD(&cmos, cmos); READ_POD(&cmos_sync_flag, cmos_sync_flag);
+    READ_POD(&cmos_sync_sec, cmos_sync_sec); READ_POD(&cmos_sync_min, cmos_sync_min); READ_POD(&cmos_sync_hour, cmos_sync_hour);
+}
+#endif
 
 namespace
 {

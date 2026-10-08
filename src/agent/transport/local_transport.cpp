@@ -1,7 +1,12 @@
+#include "config.h"
 #if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
 #include "rpc_transport.h"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cerrno>
+#include <cstring>
 #include <condition_variable>
 #include <mutex>
 #include <thread>
@@ -11,6 +16,13 @@
 #include <windows.h>
 #include <sddl.h>
 #pragma comment(lib, "Advapi32.lib")
+#else
+#include <fcntl.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
+#include <unistd.h>
 #endif
 
 namespace dosbox_agent {
@@ -291,6 +303,8 @@ private:
 
 class UnixSocketTransport final : public IRpcTransport {
 public:
+    ~UnixSocketTransport() override { Stop(); }
+
     const char* Name() const override { return "unix_socket"; }
 
     bool ValidateConfiguration(const AgentConfig& config,
@@ -301,19 +315,159 @@ public:
                 *error = "Unix socket endpoint must be an absolute path";
             return false;
         }
+#ifndef WIN32
+        if (config.endpoint.size() >= sizeof(sockaddr_un::sun_path)) {
+            if (error) *error = "Unix socket endpoint exceeds sun_path capacity";
+            return false;
+        }
+        const std::string parent = config.endpoint.substr(0, config.endpoint.rfind('/'));
+        struct stat directory = {};
+        if (stat(parent.c_str(), &directory) != 0 || !S_ISDIR(directory.st_mode) ||
+            directory.st_uid != geteuid() || (directory.st_mode & 0077) != 0) {
+            if (error) *error = "Unix socket requires an owned private parent directory (0700)";
+            return false;
+        }
+#endif
         return true;
     }
 
-    bool Start(const AgentConfig&,
-               RequestHandler,
+    bool Start(const AgentConfig& config,
+               RequestHandler handler,
                std::string* error) override
     {
-        if (error != NULL)
-            *error = "Unix socket transport is outside the Windows v1 scope";
+#ifdef WIN32
+        if (error) *error = "Unix socket transport is unavailable on Windows";
+        return false;
+#else
+        if (!ValidateConfiguration(config, error) || !handler)
+            return false;
+        if (listener >= 0) {
+            if (error) *error = "Unix socket transport is already running";
+            return false;
+        }
+        listener = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+        if (listener < 0) {
+            if (error) *error = std::string("socket: ") + strerror(errno);
+            return false;
+        }
+        sockaddr_un address = {};
+        address.sun_family = AF_UNIX;
+        memcpy(address.sun_path, config.endpoint.c_str(), config.endpoint.size() + 1);
+        // Never replace an existing endpoint or file.
+        if (bind(listener, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
+            if (error) *error = std::string("bind: ") + strerror(errno);
+            close(listener);
+            listener = -1;
+            return false;
+        }
+        endpoint = config.endpoint;
+        if (lstat(endpoint.c_str(), &owned_endpoint) != 0 ||
+            chmod(endpoint.c_str(), 0600) != 0 || listen(listener, 8) != 0) {
+            if (error) *error = std::string("Unix socket setup: ") + strerror(errno);
+            Stop();
+            return false;
+        }
+        settings = config;
+        callback = handler;
+        stopping = false;
+        worker = std::thread(&UnixSocketTransport::Run, this);
+        return true;
+#endif
+    }
+
+    void Stop() override
+    {
+#ifndef WIN32
+        stopping = true;
+        if (worker.joinable()) worker.join();
+        if (listener >= 0) close(listener);
+        listener = -1;
+        struct stat current = {};
+        if (!endpoint.empty() && lstat(endpoint.c_str(), &current) == 0 &&
+            current.st_dev == owned_endpoint.st_dev && current.st_ino == owned_endpoint.st_ino)
+            unlink(endpoint.c_str());
+        endpoint.clear();
+#endif
+    }
+
+private:
+#ifndef WIN32
+    int listener = -1;
+    std::atomic<bool> stopping{false};
+    std::thread worker;
+    std::string endpoint;
+    struct stat owned_endpoint = {};
+    AgentConfig settings;
+    RequestHandler callback;
+    typedef std::chrono::steady_clock Clock;
+
+    bool Ready(int fd, short events, Clock::time_point deadline)
+    {
+        while (!stopping && Clock::now() < deadline) {
+            pollfd descriptor = {fd, events, 0};
+            const int result = poll(&descriptor, 1, 100);
+            if (result < 0 && errno != EINTR) return false;
+            if (result > 0) return (descriptor.revents & events) != 0;
+        }
         return false;
     }
 
-    void Stop() override {}
+    bool Send(int fd, const std::string& response)
+    {
+        const auto deadline = Clock::now() + std::chrono::milliseconds(settings.request_timeout_ms);
+        std::size_t offset = 0;
+        while (offset < response.size()) {
+            if (!Ready(fd, POLLOUT, deadline)) return false;
+            const ssize_t count = send(fd, response.data() + offset,
+                                      response.size() - offset, MSG_NOSIGNAL);
+            if (count < 0 && (errno == EINTR || errno == EAGAIN)) continue;
+            if (count <= 0) return false;
+            offset += static_cast<std::size_t>(count);
+        }
+        return true;
+    }
+
+    void Serve(int fd)
+    {
+        std::string pending;
+        char buffer[4096];
+        auto deadline = Clock::now() + std::chrono::milliseconds(settings.request_timeout_ms);
+        while (Ready(fd, POLLIN, deadline)) {
+            const ssize_t count = recv(fd, buffer, sizeof(buffer), 0);
+            if (count < 0 && (errno == EINTR || errno == EAGAIN)) continue;
+            if (count <= 0) return;
+            pending.append(buffer, static_cast<std::size_t>(count));
+            for (;;) {
+                const auto newline = pending.find('\n');
+                if ((newline == std::string::npos && pending.size() > settings.max_message_bytes) ||
+                    (newline != std::string::npos && newline > settings.max_message_bytes)) {
+                    Send(fd, callback(std::string(settings.max_message_bytes + 1, 'x')) + "\n");
+                    return;
+                }
+                if (newline == std::string::npos) break;
+                std::string request = pending.substr(0, newline);
+                pending.erase(0, newline + 1);
+                if (!request.empty() && request.back() == '\r') request.pop_back();
+                if (!Send(fd, callback(request) + "\n")) return;
+                deadline = Clock::now() + std::chrono::milliseconds(settings.request_timeout_ms);
+            }
+        }
+    }
+
+    void Run()
+    {
+        while (!stopping) {
+            if (!Ready(listener, POLLIN, Clock::now() + std::chrono::milliseconds(100))) continue;
+            const int fd = accept(listener, NULL, NULL);
+            if (fd < 0) continue;
+            if (fcntl(fd, F_SETFD, FD_CLOEXEC) == 0 &&
+                fcntl(fd, F_SETFL, O_NONBLOCK) == 0) {
+                try { Serve(fd); } catch (...) { /* Close a failed client; keep the endpoint alive. */ }
+            }
+            close(fd);
+        }
+    }
+#endif
 };
 
 } // namespace

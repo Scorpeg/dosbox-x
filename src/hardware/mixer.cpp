@@ -60,6 +60,21 @@
 #include "hardware.h"
 #include "programs.h"
 #include "midi.h"
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+#include "agent/audio_capture.h"
+#include "agent/audio_sink.h"
+#include "cpu.h"
+#include <atomic>
+#include <mutex>
+static dosbox_agent::AudioHistory agent_audio;
+static std::atomic<std::uint64_t> agent_audio_callbacks{0};
+static bool agent_isolated_audio = false;
+static std::atomic<bool> agent_host_muted{false};
+static std::string agent_audio_output, agent_audio_open_error;
+static std::mutex agent_sink_mutex;
+static dosbox_agent::AudioSinkQueue<16384> agent_sink;
+extern unsigned long long mixer_sample_counter;
+#endif
 
 #define MIXER_SSIZE 4
 #define MIXER_VOLSHIFT 13
@@ -111,6 +126,11 @@ static struct {
 } mixer;
 
 uint32_t Mixer_MIXQ(void) {
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+    // Host mute/output availability must not affect the emulated producer.
+    if (agent_isolated_audio)
+        return mixer.freq | (2u << 20u) | (mixer.swapstereo ? (1u << 29u) : 0u) | (1u << 31u);
+#endif
 	return  ((uint32_t)mixer.freq) |
 		((uint32_t)2u/*channels*/ << (uint32_t)20u) |
 		(mixer.swapstereo ?      ((uint32_t)1u << (uint32_t)29u) : 0u) |
@@ -387,8 +407,12 @@ void MixerChannel::Mix(Bitu whole,Bitu frac) {
         if (--patience == 0) break;
     }
 
-    if (msbuffer_o < whole)
+    if (msbuffer_o < whole) {
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+        agent_audio.Padding(name, mixer_sample_counter, whole - msbuffer_o, dosbox_agent::AGENT_Sha256Hex);
+#endif
         padFillSampleInterpolation(whole);
+    }
 
     upto = whole;
     if (upto > msbuffer_o) upto = msbuffer_o;
@@ -717,6 +741,29 @@ static void MIXER_MixData(Bitu fracs/*render up to*/) {
         }
     }
 
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+    if (agent_audio.active) {
+        // Observe after synthesis/DC correction but before host gain/output; never trigger device work.
+        for (Bitu i = 0; i < whole - prev_rendered; ++i) {
+            const auto at = mixer.work_in + prev_rendered + i;
+            agent_audio.Frame(mixer.freq, mixer_sample_counter + i,
+                    MIXER_CLIP(mixer.work[at][0] >> MIXER_VOLSHIFT),
+                    MIXER_CLIP(mixer.work[at][1] >> MIXER_VOLSHIFT), dosbox_agent::AGENT_Sha256Hex);
+        }
+    }
+    if (agent_isolated_audio) {
+        // Presentation queue state must not affect mixer.work_*.
+        const int32_t vl = (int32_t)(mixer.mastervol[0] * (1 << MIXER_VOLSHIFT));
+        const int32_t vr = (int32_t)(mixer.mastervol[1] * (1 << MIXER_VOLSHIFT));
+        std::lock_guard<std::mutex> lock(agent_sink_mutex);
+        for (Bitu i = 0; i < whole - prev_rendered; ++i) {
+            const auto at = mixer.work_in + prev_rendered + i;
+            agent_sink.Push(MIXER_CLIP(((int64_t)mixer.work[at][0] * vl) >> (MIXER_VOLSHIFT * 2)),
+                            MIXER_CLIP(((int64_t)mixer.work[at][1] * vr) >> (MIXER_VOLSHIFT * 2)));
+        }
+    }
+#endif
+
     if (CaptureState & (CAPTURE_WAVE|CAPTURE_VIDEO)) {
         int32_t volscale1 = (int32_t)(mixer.recordvol[0] * (1 << MIXER_VOLSHIFT));
         int32_t volscale2 = (int32_t)(mixer.recordvol[1] * (1 << MIXER_VOLSHIFT));
@@ -807,6 +854,18 @@ static void MIXER_Mix(void) {
 }
 
 static void SDLCALL MIXER_CallBack(void * userdata, Uint8 *stream, int len) {
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+    ++agent_audio_callbacks;
+    if (agent_isolated_audio) {
+        if (len <= 0) return;
+        // Host callbacks must not touch producer counters, DMA, devices or PIC state.
+        memset(stream, 0, (size_t)len);
+        std::lock_guard<std::mutex> lock(agent_sink_mutex);
+        agent_sink.Pull(reinterpret_cast<int16_t*>(stream), (size_t)len / MIXER_SSIZE,
+                        agent_host_muted.load() || agent_audio_output == "muted");
+        return;
+    }
+#endif
     (void)userdata;//UNUSED
     int32_t volscale1 = (int32_t)(mixer.mastervol[0] * (1 << MIXER_VOLSHIFT));
     int32_t volscale2 = (int32_t)(mixer.mastervol[1] * (1 << MIXER_VOLSHIFT));
@@ -1018,6 +1077,9 @@ MixerObject::~MixerObject(){
 
 void MENU_mute(bool enabled) {
     mixer.mute=enabled;
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+    agent_host_muted = enabled;
+#endif
     mainMenu.get_item("mixer_mute").check(mixer.mute).refresh_item(mainMenu);
 }
 
@@ -1145,6 +1207,23 @@ void MIXER_Init() {
     mixer.dc_bias_adj=section->Get_bool("dc bias correction");
     mixer.mute=false;
     if (control->opt_silent) mixer.nosound = true;
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+    agent_isolated_audio = section->Get_bool("isolated output");
+    agent_host_muted = false;
+    agent_audio_output.clear();
+    agent_audio_open_error.clear();
+    if (agent_isolated_audio) {
+        // Host output selection must not change legacy emulation behavior.
+        const char* output = getenv("DOSBOX_PROOF_AUDIO_OUTPUT");
+        agent_audio_output = output ? output : "none";
+        if (agent_audio_output != "none" && agent_audio_output != "dummy" &&
+            agent_audio_output != "muted" && agent_audio_output != "system")
+            E_Exit("Invalid DOSBOX_PROOF_AUDIO_OUTPUT");
+        if (mixer.nosound) E_Exit("isolated output requires nosound=false; select the host sink separately");
+        std::lock_guard<std::mutex> lock(agent_sink_mutex);
+        agent_sink = dosbox_agent::AudioSinkQueue<16384>();
+    }
+#endif
 
     /* Initialize the internal stuff */
     mixer.prebuffer_samples=0;
@@ -1163,8 +1242,8 @@ void MIXER_Init() {
     mixer.dc_adj[1]=0;
 
     /* Start the Mixer using SDL Sound at 22 khz */
-    SDL_AudioSpec spec;
-    SDL_AudioSpec obtained;
+    SDL_AudioSpec spec = {};
+    SDL_AudioSpec obtained = {};
 
     spec.freq=(int)mixer.freq;
     spec.format=AUDIO_S16SYS;
@@ -1173,6 +1252,34 @@ void MIXER_Init() {
     spec.userdata=NULL;
     spec.samples=(Uint16)mixer.blocksize;
 
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+    if (agent_isolated_audio) {
+#ifdef C_SDL2
+        if (agent_audio_output != "none") {
+            if ((agent_audio_output == "dummy" || agent_audio_output == "muted") &&
+                SDL_setenv("SDL_AUDIODRIVER", "dummy", 1) != 0)
+                E_Exit("Cannot select isolated dummy audio sink");
+            // SDL must preserve our callback format/rate; host negotiation must not alter the producer.
+            if (SDL_InitSubSystem(SDL_INIT_AUDIO) < 0 ||
+                (SDL2_AudioDevice = SDL_OpenAudioDevice(NULL, 0, &spec, &obtained, 0)) == 0) {
+                agent_audio_open_error = SDL_GetError();
+            } else if (obtained.freq != spec.freq || obtained.format != spec.format || obtained.channels != spec.channels) {
+                agent_audio_open_error = "host callback format differs from fixed producer";
+                SDL_CloseAudioDevice(SDL2_AudioDevice);
+                SDL2_AudioDevice = 0;
+            }
+            if (!agent_audio_open_error.empty())
+                LOG_MSG("Isolated host audio unavailable: %s (guest audio continues)", agent_audio_open_error.c_str());
+        }
+#else
+        E_Exit("isolated output requires SDL2");
+#endif
+        TIMER_AddTickHandler(MIXER_Mix);
+        if (mixer.sampleaccurate) PIC_AddEvent(MIXER_MixSingle,1000.0 / mixer.freq);
+        // Keep output paused until producer initialization finishes.
+    } else
+#endif
+    {
 #ifdef C_SDL2
     if (SDL_InitSubSystem(SDL_INIT_AUDIO) < 0) {
         LOG(LOG_MISC,LOG_DEBUG)("MIXER:Can't initialize SDL audio: %s , running in nosound mode.",SDL_GetError());
@@ -1215,6 +1322,7 @@ void MIXER_Init() {
         SDL_PauseAudio(0);
 #endif
     }
+    }
     mixer_start_pic_time = PIC_FullIndex();
     mixer_sample_counter = 0;
     mixer.work_in = mixer.work_out = 0;
@@ -1244,6 +1352,9 @@ void MIXER_Init() {
 
     // DC bias adjustment for games like In Extremis and their digitized samples that are WAY off center
     DC_ADJUSTMENT_STEP = (int32_t)((1ul << DC_ADJBITS) / (unsigned long)mixer.freq);
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT) && defined(C_SDL2)
+    if (agent_isolated_audio && SDL2_AudioDevice != 0) SDL_PauseAudioDevice(SDL2_AudioDevice, 0);
+#endif
 
     LOG(LOG_MISC,LOG_DEBUG)("Mixer: sample_accurate=%u blocksize=%u sdl_rate=%uHz mixer_rate=%uHz channels=%u samples=%u min/max/need=%u/%u/%u per_ms=%u %u/%u samples prebuffer=%u dcadj=%.10f(en=%u)",
         (unsigned int)mixer.sampleaccurate,
@@ -1266,6 +1377,84 @@ void MIXER_Init() {
 
     MIXER_Controls_Init();
 }
+
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+namespace dosbox_agent {
+void AGENT_AudioReset() { agent_audio = AudioHistory(); agent_audio_callbacks = 0; }
+bool AGENT_AudioCapture(bool begin, JsonValue* result, std::string* error) {
+    if (begin && !agent_audio.Begin(mixer.freq, mixer_sample_counter, AGENT_Sha256Hex)) {
+        if (error) *error = "audio epoch already active or mixer rate unsupported";
+        return false;
+    }
+    if (!agent_audio.active || !agent_audio.failure.empty()) {
+        if (error) *error = agent_audio.failure.empty() ? "audio epoch is not active" : agent_audio.failure;
+        return false;
+    }
+    auto number = [](std::uint64_t n) { return JsonValue::Number(std::to_string(n)); };
+    auto value = JsonValue::Object();
+    value.object["contract"] = JsonValue::String("mixer-rendered-v1");
+    value.object["whole_audio_qualified"] = JsonValue::Bool(false);
+    auto state = JsonValue::Object();
+    state.object["rate"] = number(agent_audio.rate);
+    state.object["channels"] = number(2);
+    state.object["format"] = JsonValue::String("s16le");
+    state.object["phase"] = JsonValue::String("post-channel-dc-before-host-master-and-callback");
+    state.object["block_frames"] = number(AudioHistory::BlockFrames);
+    state.object["source_origin"] = number(agent_audio.origin);
+    state.object["frames"] = number(agent_audio.frames);
+    state.object["blocks"] = number(agent_audio.blocks);
+    state.object["silent_frames"] = number(agent_audio.silent);
+    state.object["partial_frames"] = number(agent_audio.pending.size() / 4);
+    state.object["chain_sha256"] = JsonValue::String(agent_audio.chain);
+    state.object["partial_sha256"] = JsonValue::String(AGENT_Sha256Hex(agent_audio.pending));
+    state.object["padding_calls"] = number(agent_audio.padding_calls);
+    state.object["padding_frames"] = number(agent_audio.padding_frames);
+    state.object["padding_sha256"] = JsonValue::String(agent_audio.padding_chain);
+    value.object["storage"] = state;
+    value.object["sb_playback"] = AGENT_SbPlaybackStorage();
+    auto sink = JsonValue::Object();
+    sink.object["callbacks"] = number(agent_audio_callbacks.load());
+    sink.object["nosound"] = JsonValue::Bool(mixer.nosound);
+    if (agent_isolated_audio) {
+        auto isolation = JsonValue::Object();
+        isolation.object["contract"] = JsonValue::String("producer-sink-v1");
+        isolation.object["output"] = JsonValue::String(agent_audio_output);
+        isolation.object["open_error"] = JsonValue::String(agent_audio_open_error);
+        isolation.object["capacity"] = number(16384);
+        isolation.object["sample_accurate"] = JsonValue::Bool(mixer.sampleaccurate);
+        isolation.object["producer_rate"] = number(mixer.freq);
+        isolation.object["producer_blocksize"] = number(mixer.blocksize);
+        {
+            std::lock_guard<std::mutex> lock(agent_sink_mutex);
+            isolation.object["queued"] = number(agent_sink.queued);
+            isolation.object["enqueued"] = number(agent_sink.enqueued);
+            isolation.object["consumed"] = number(agent_sink.consumed);
+            isolation.object["dropped"] = number(agent_sink.dropped);
+            isolation.object["underrun"] = number(agent_sink.underrun);
+            isolation.object["muted"] = number(agent_sink.muted);
+        }
+        sink.object["isolation"] = isolation;
+    }
+#ifdef C_SDL2
+    sink.object["device_open"] = JsonValue::Bool(SDL2_AudioDevice != 0);
+    const auto* driver = SDL_GetCurrentAudioDriver();
+    sink.object["driver"] = JsonValue::String(driver ? driver : "");
+#else
+    sink.object["device_open"] = JsonValue::Bool(!mixer.nosound);
+    sink.object["driver"] = JsonValue::String("sdl1");
+#endif
+    value.object["host_sink"] = sink; // Excluded from the emulated evidence digest.
+    auto position = JsonValue::Object();
+    position.object["pic_ticks"] = number(PIC_Ticks);
+    position.object["cycle_max"] = JsonValue::Number(std::to_string(CPU_CycleMax));
+    position.object["cycle_left"] = JsonValue::Number(std::to_string(CPU_CycleLeft));
+    position.object["cycles"] = JsonValue::Number(std::to_string(CPU_Cycles));
+    value.object["position"] = position;
+    *result = value;
+    return true;
+}
+}
+#endif
 
 // save state support
 //void *MIXER_Mix_NoSound_PIC_Timer = (void*)MIXER_Mix_NoSound;

@@ -521,6 +521,8 @@ public:
 	Bitu SLDT(void) const {
 		return ldt_value;
 	}
+	LinearPt LdtBase(void) const { return ldt_base; }
+	Bitu LdtLimit(void) const { return ldt_limit; }
 	bool LLDT(Bitu value) {
 		if ((value&0xfffc)==0) {
 			ldt_value=0;

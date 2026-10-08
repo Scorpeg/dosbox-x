@@ -20,9 +20,10 @@ public:
 
     bool BindToCurrentThread();
     bool IsBoundToCurrentThread() const;
-    std::uint64_t Submit(Command command);
-    std::uint64_t SubmitAfter(std::uint32_t delay_ms, Command command);
-    std::size_t Pump();
+    std::uint64_t Submit(Command command, bool drain_safe = false);
+    std::uint64_t SubmitAfter(std::uint32_t delay_ms, Command command, bool drain_safe = false);
+    // During loader backpressure, service only whitelisted stream commands.
+    std::size_t Pump(bool drain_only = false);
     void Shutdown();
 
 private:
@@ -36,6 +37,12 @@ EmulationThreadQueue& AGENT_EmulationQueue();
 void AGENT_BridgeAttachToCurrentThread();
 std::size_t AGENT_BridgePump();
 void AGENT_BridgeShutdown();
+void AGENT_ArmStartupBarrier();
+void AGENT_StartupBarrier();
+void AGENT_ReleaseStartupBarrier();
+bool AGENT_StartupStartAllowed();
+void AGENT_SetInitialRtc(std::int64_t epoch);
+std::int64_t AGENT_InitialRtc();
 void AGENT_SetDebuggerStopListener(DebuggerStopListener listener);
 void AGENT_NotifyDebuggerStopped(std::uint16_t segment, std::uint32_t instruction_pointer);
 bool AGENT_RunQueueSelfTest(std::string* error);

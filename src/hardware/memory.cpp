@@ -849,6 +849,34 @@ class Mem4GBPageHandler : public PageHandler {
 
 static Mem4GBPageHandler mem4gb_handler;
 
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+namespace dosbox_agent {
+bool AGENT_IsOrdinaryRam(std::uint64_t address, std::uint64_t bytes) {
+    if (!MemBase || !bytes || address < 0x100000 || address >= MemSize ||
+        bytes > MemSize - address || address + bytes > 0x1000000 ||
+        !memory.phandlers || !memory.a20.enabled) return false;
+    for (auto page = address >> 12; page <= (address + bytes - 1) >> 12; ++page) {
+        // MEM_GetPageHandler can fill caches or call devices; reject unresolved mappings instead.
+        if (page >= memory.handler_pages || page >= memory.reported_pages ||
+            (page & memory.mem_alias_pagemask_active) != page ||
+            memory.phandlers[page] != &ram_page_handler) return false;
+    }
+    return true;
+}
+bool AGENT_IsModuleRam(std::uint64_t address, std::uint64_t bytes) {
+    if (!MemBase || !bytes || address >= MemSize || bytes > MemSize - address ||
+        address + bytes > 0x1000000 || !memory.phandlers ||
+        (address < 0x100000 && address + bytes > 0xa0000)) return false;
+    for (auto page = address >> 12; page <= (address + bytes - 1) >> 12; ++page) {
+        if (page >= memory.handler_pages || page >= memory.reported_pages ||
+            (page & memory.mem_alias_pagemask_active) != page ||
+            memory.phandlers[page] != &ram_page_handler) return false;
+    }
+    return true;
+}
+}
+#endif
+
 PageHandler * MEM_GetPageHandler(Bitu phys_page) {
 	phys_page &= memory.mem_alias_pagemask_active;
 

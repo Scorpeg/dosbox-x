@@ -20,6 +20,9 @@
 
 #include "dosbox.h"
 #include "keyboard.h"
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+#include "agent/replay_timeline.h"
+#endif
 #include "logging.h"
 #include "support.h"
 #include "setup.h"
@@ -331,6 +334,9 @@ static void KEYBOARD_Add8042Response(uint8_t data) {
 
     if (keyb.buf8042_pos >= sizeof(keyb.buf8042)) {
         LOG(LOG_KEYBOARD,LOG_NORMAL)("8042 Buffer full, dropping code");
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+        dosbox_agent::AGENT_ReplayInputLoss("8042 response buffer overflow");
+#endif
         KEYBOARD_ClrBuffer(); return;
     }
 
@@ -341,6 +347,9 @@ static void KEYBOARD_Add8042Response(uint8_t data) {
 void KEYBOARD_AddBuffer(uint16_t data) {
     if (keyb.used>=KEYBUFSIZE) {
         LOG(LOG_KEYBOARD,LOG_NORMAL)("Buffer full, dropping code");
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+        dosbox_agent::AGENT_ReplayInputLoss("keyboard buffer overflow");
+#endif
         KEYBOARD_ClrBuffer(); return;
     }
     Bitu start=keyb.pos+keyb.used;
@@ -1903,6 +1912,9 @@ static void KEYBOARD_TickHandler(void) {
 void APM_Suspend_Wakeup_Key(void);
 
 void KEYBOARD_AddKey(KBD_KEYS keytype,bool pressed) {
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+    if (keyb.reset) dosbox_agent::AGENT_ReplayInputLoss("key attempted during keyboard reset");
+#endif
     /* If the BIOS has put the system into APM suspend, let certain keys wake it up again.
      * Send on RELEASE so that the key isn't also typed into the guest OS. */
     if (!pressed && (keytype == KBD_space))
@@ -3016,6 +3028,11 @@ void KEYBOARD_Reset() {
 }
 
 //save state support
+#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
+void AGENT_SaveKeyboard(std::ostream& stream) { WRITE_POD(&keyb, keyb); WRITE_POD(&port_61_data, port_61_data); }
+void AGENT_LoadKeyboard(std::istream& stream) { READ_POD(&keyb, keyb); READ_POD(&port_61_data, port_61_data); }
+namespace dosbox_agent { std::uint8_t AGENT_SpeakerPort61() { return port_61_data; } }
+#endif
 void *KEYBOARD_TransferBuffer_PIC_Event = (void*)((uintptr_t)KEYBOARD_TransferBuffer);
 void *KEYBOARD_TickHandler_PIC_Timer = (void*)((uintptr_t)KEYBOARD_TickHandler);
 
