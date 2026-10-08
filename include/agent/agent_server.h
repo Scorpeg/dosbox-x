@@ -20,7 +20,7 @@ public:
     AgentServer& operator=(const AgentServer&) = delete;
 
     bool StartFromConfigFile(const std::string& path, std::string* error);
-    bool Start(const AgentConfig& config, std::string* error);
+    bool Start(const AgentConfig& config, std::string* error, bool in_process = false);
     bool StartForTest(const AgentConfig& config, std::string* error);
     void Stop();
 

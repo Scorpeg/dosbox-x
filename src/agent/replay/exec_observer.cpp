@@ -9,6 +9,7 @@
 #include "pic.h"
 #include "cpu.h"
 #include <chrono>
+#include <exception>
 #include <thread>
 
 namespace dosbox_agent {
@@ -155,7 +156,8 @@ void ExecObservation::Relocation(const std::uint8_t* bytes, std::uint16_t length
 void ExecObservation::Success(std::uint32_t entry_, bool has_entry_) {
     success = true; entry = entry_; has_entry = has_entry_;
 }
-ExecObservation::~ExecObservation() {
+ExecObservation::~ExecObservation() noexcept(false) {
+    if (std::uncaught_exception()) { window.Fail("DOS EXEC unwound before completion"); return; }
     if (!active) return;
     fields.object["success"] = JsonValue::Bool(success);
     fields.object["dos_error"] = success ? JsonValue::Null() : Num(dos.errorcode);
@@ -194,7 +196,9 @@ ExecExitObservation::ExecExitObservation(std::uint16_t psp_, std::uint16_t paren
       selected(armed && entered && psp_ == selected_psp && parent_ == selected_parent), code(code_) {
     AGENT_ExecExit(psp, parent, resident, code);
 }
-ExecExitObservation::~ExecExitObservation() {
+ExecExitObservation::~ExecExitObservation() noexcept(false) {
+    // Allow DOSBox's integer shutdown exception through this scope guard.
+    if (std::uncaught_exception()) { window.Fail("DOS termination unwound before completion"); return; }
     if (selected) AGENT_ReplayProgramExit(psp, parent, resident, code);
 }
 bool AGENT_ExecCommand(const JsonValue& params, JsonValue* result, std::string* error) {

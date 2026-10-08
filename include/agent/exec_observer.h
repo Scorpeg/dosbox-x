@@ -54,7 +54,7 @@ bool AGENT_ExecCommand(const JsonValue& params, JsonValue* result, std::string* 
 class ExecObservation {
 public:
     ExecObservation(const char* name, std::uint16_t mode, std::uint32_t parameter);
-    ~ExecObservation();
+    ~ExecObservation() noexcept(false);
     void Mode(std::uint16_t effective);
     void Opened(std::uint16_t handle);
     void Header(const std::uint8_t* bytes, std::uint16_t length, bool com);
@@ -77,7 +77,7 @@ private:
 class ExecExitObservation {
 public:
     ExecExitObservation(std::uint16_t psp, std::uint16_t parent, bool resident, std::uint8_t code);
-    ~ExecExitObservation();
+    ~ExecExitObservation() noexcept(false);
 private:
     std::uint16_t psp, parent;
     bool resident, selected;

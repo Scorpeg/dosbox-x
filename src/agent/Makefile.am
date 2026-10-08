@@ -6,6 +6,7 @@ libagent_a_SOURCES = \
 	protocol/agent_protocol.cpp \
 	protocol/sha256.cpp \
 	replay/native_archive.cpp \
+	replay/native_replay.cpp \
 	bridge/agent_bridge.cpp \
 	debugger/debugger_adapter.cpp \
 	parser/debugger_output_parser.cpp \

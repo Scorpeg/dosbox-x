@@ -36,6 +36,7 @@
 #if defined(C_DOSBOX_AGENT)
 #include "agent/agent_bridge.h"
 #include "agent/agent_server.h"
+#include "agent/native_replay.h"
 #if defined(C_DEBUG)
 #include "agent/replay_timeline.h"
 #endif
@@ -8490,6 +8491,17 @@ void DISP2_Init(uint8_t color), DISP2_Shut();
 //extern void UI_Init(void);
 void grGlideShutdown(void);
 int main(int argc, char* argv[]) SDL_MAIN_NOEXCEPT {
+#if defined(C_DOSBOX_AGENT)
+    try {
+        if (dosbox_agent::NativeReplayPrepare(argc, argv)) {
+            if (dosbox_agent::NativeReplayInspectionDone()) return 0;
+            argc = 1;
+        }
+    } catch (const std::exception& error) {
+        fprintf(stderr, "%s\n", error.what());
+        return 1;
+    }
+#endif
 #if (defined __i386__ || defined __x86_64__) && (!defined IS_OLDMACOS && (defined BSD || defined LINUX))
     dropPrivilegesTemp();
 #endif
@@ -8498,9 +8510,23 @@ int main(int argc, char* argv[]) SDL_MAIN_NOEXCEPT {
     bool saved_opt_test;
 #if defined(C_DOSBOX_AGENT)
     dosbox_agent::AgentServer agent_server;
+    struct NativeReplayShutdown {
+        dosbox_agent::AgentServer& server;
+        ~NativeReplayShutdown() {
+            if (dosbox_agent::NativeReplayEnabled()) {
+                dosbox_agent::NativeReplayCancel();
+                server.Stop();
+                dosbox_agent::NativeReplayJoin();
+            }
+        }
+    } native_replay_shutdown{agent_server};
 #endif
 
+#if defined(C_DOSBOX_AGENT)
+    srand(dosbox_agent::NativeReplayEnabled() ? 0 : static_cast<unsigned>(time(NULL)));
+#else
     srand(time(NULL));
+#endif
 
     control=&myconf;
 
@@ -8511,6 +8537,15 @@ int main(int argc, char* argv[]) SDL_MAIN_NOEXCEPT {
 
     /* -- parse command line arguments */
     if (!DOSBOX_parse_argv()) return 1;
+#if defined(C_DOSBOX_AGENT)
+    if (dosbox_agent::NativeReplayEnabled()) {
+        control->opt_defaultconf = true;
+        control->opt_defaultmapper = true;
+        control->opt_noautoexec = true;
+        control->opt_fastlaunch = true;
+        control->opt_promptfolder = 0;
+    }
+#endif
 
     if (control->opt_time_limit > 0)
         time_limit_ms = (Bitu)(control->opt_time_limit * 1000);
@@ -8567,6 +8602,17 @@ int main(int argc, char* argv[]) SDL_MAIN_NOEXCEPT {
     SDL_SetupConfigSection();
     LOG::SetupConfigSection();
     DOSBOX_SetupConfigSections();
+#if defined(C_DOSBOX_AGENT)
+    if (dosbox_agent::NativeReplayEnabled()) {
+        try {
+            if (!dosbox_agent::NativeReplayApplyConfig(*control)) return 1;
+            dosbox_agent::NativeReplayStart(agent_server);
+        } catch (const std::exception& error) {
+            fprintf(stderr, "%s\n", error.what());
+            return 1;
+        }
+    }
+#endif
 
 #if 0 /* VGA_Draw_2 self test: dot clock */
     {
@@ -10705,6 +10751,13 @@ fresh_boot:
 #endif
 
         /* and then shutdown */
+#if defined(C_DOSBOX_AGENT)
+        if (dosbox_agent::NativeReplayEnabled()) {
+            dosbox_agent::NativeReplayCancel();
+            agent_server.Stop();
+            dosbox_agent::NativeReplayJoin();
+        }
+#endif
         GFX_ShutDown();
 
         void CPU_Snap_Back_Forget();
@@ -10823,6 +10876,9 @@ fresh_boot:
          * freed resources. */
         control = NULL; /* any deref past this point and you deserve to segfault */
     }
+#if defined(C_DOSBOX_AGENT)
+    if (dosbox_agent::NativeReplayEnabled()) return dosbox_agent::NativeReplayExitCode();
+#endif
     return saved_opt_test&&testerr?1:0;
 }
 

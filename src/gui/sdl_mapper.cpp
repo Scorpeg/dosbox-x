@@ -4894,6 +4894,7 @@ static void MAPPER_SaveBinds(void) {
 }
 
 static bool MAPPER_LoadBinds(void) {
+    if (control->opt_defaultmapper) return false;
     FILE * loadfile=fopen(mapper.filename.c_str(),"rt");
     if (!loadfile) return false;
 	ClearAllBinds();
@@ -5735,6 +5736,11 @@ void MAPPER_Init(void) {
 std::string GetDOSBoxXPath(bool withexe=false);
 void ResolvePath(std::string& in);
 void ReloadMapper(Section_prop *section, bool init) {
+    // Native replay must not inherit a host mapper file.
+    if (control->opt_defaultmapper) {
+        if (init) MAPPER_Init();
+        return;
+    }
     if (!init&&control->opt_defaultmapper) return;
     Prop_path* pp;
 #if defined(C_SDL2)

@@ -36,6 +36,7 @@ using namespace std;
 #include "debug.h"
 #if defined(C_DOSBOX_AGENT)
 #include "agent/agent_bridge.h"
+#include "agent/native_replay.h"
 #endif
 #include "cross.h" //snprintf
 #include "fpu_state.h"
@@ -5164,6 +5165,11 @@ void dyn_core_dh_debug_flush (void);
 Bitu DEBUG_Loop(void) {
 #if defined(C_DOSBOX_AGENT)
     dosbox_agent::AGENT_BridgePump();
+    if (dosbox_agent::NativeReplayEnabled()) {
+        GFX_Events();
+        SDL_Delay(1);
+        return 0; // Hold at entry without curses, a TTY or guest IRQ pumping.
+    }
 #endif
     ControlServer_Poll();
 
@@ -5257,6 +5263,19 @@ void DEBUG_WarnDynamic(void) {
 bool tohide=true;
 static bool hidedebugger=false;
 void DEBUG_Enable_Handler(bool pressed) {
+#if defined(C_DOSBOX_AGENT)
+    if (dosbox_agent::NativeReplayEnabled()) {
+        if (!pressed || debugging) return;
+        CPU_CycleLeft += CPU_Cycles;
+        CPU_Cycles = 0;
+        LoopHandler* loop = DOSBOX_GetLoop();
+        if (loop != DEBUG_Loop) old_loop = loop;
+        debugging = true; debug_running = false; runnormal = false;
+        DOSBOX_SetLoop(&DEBUG_Loop);
+        dosbox_agent::AGENT_NotifyDebuggerStopped(SegValue(cs), reg_eip);
+        return;
+    }
+#endif
 	if (!pressed || control->opt_display2)
 		return;
 
@@ -5364,7 +5383,18 @@ void DEBUG_Enable_Handler(bool pressed) {
     else if (debugrunmode==2) {char command[] = "RUNWATCH"; ParseCommand(command);}
 }
 
+bool DEBUG_NativeContinue(void) {
+    if (!debugging || debug_running) return false;
+    CBreakpoint::ActivateBreakpointsExceptAt(SegPhys(cs) + reg_eip);
+    debugging = false;
+    DOSBOX_SetNormalLoop();
+    return true;
+}
+
 void DEBUG_DrawScreen(void) {
+#if defined(C_DOSBOX_AGENT)
+    if (dosbox_agent::NativeReplayEnabled()) return;
+#endif
 	DrawData();
 	DrawCode();
     DrawInput();
@@ -6086,6 +6116,9 @@ void DBGBlock::set_data_view(unsigned int view) {
 }
 
 void DEBUG_SetupConsole(void) {
+#if defined(C_DOSBOX_AGENT)
+    if (dosbox_agent::NativeReplayEnabled()) return;
+#endif
 	if (dbg.win_main == NULL) {
         LOG(LOG_MISC, LOG_DEBUG)("DEBUG_SetupConsole initializing GUI");
 

@@ -1,4 +1,6 @@
 #include "config.h"
+#include "agent/native_replay.h"
+extern bool DEBUG_NativeContinue(void);
 #if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
 #include "dosbox.h"
 #include "agent/debugger_adapter.h"
@@ -259,6 +261,7 @@ bool DebuggerAdapter::Continue(std::string* error) const
     }
     if (AGENT_ReplayReleaseBoundary()) return true;
     DEBUG_AgentClearLastBreakpoint();
+    if (NativeReplayEnabled()) return DEBUG_NativeContinue();
     char command[] = "RUN";
     if (ParseCommand(command))
         return true;
@@ -367,7 +370,8 @@ bool DebuggerAdapter::StartTargetAtEntry(const std::string& command,
         return false;
     }
 
-    std::string debugbox_command = "DEBUGBOX " + command;
+    // Explicit relative paths let EXIT.COM bypass the shell's EXIT command.
+    std::string debugbox_command = std::string("DEBUGBOX ") + (NativeReplayEnabled() ? ".\\" : "") + command;
     for (std::vector<std::string>::const_iterator it = arguments.begin(); it != arguments.end(); ++it)
         debugbox_command += " " + *it;
     dos.errorcode = 0;

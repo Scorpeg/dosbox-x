@@ -58,6 +58,7 @@ nobase_noinst_HEADERS = \
 agent/agent_protocol.h \
 agent/agent_bridge.h \
 agent/debugger_adapter.h \
-agent/agent_server.h
-
+agent/agent_server.h \
+agent/native_archive.h \
+agent/native_replay.h
 

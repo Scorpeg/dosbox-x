@@ -1,3 +1,5 @@
+#include "config.h"
+#if defined(C_DOSBOX_AGENT) && C_DEBUG
 #include "agent/exec_observer.h"
 #include <iomanip>
 #include <sstream>
@@ -68,3 +70,4 @@ std::string AGENT_Sha256Hex(const std::vector<std::uint8_t>& data)
     return output.str();
 }
 }
+#endif

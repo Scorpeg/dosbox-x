@@ -23,6 +23,9 @@
 #include "setup.h"
 #include "control.h"
 #include "support.h"
+#if defined(C_DOSBOX_AGENT)
+#include "agent/native_replay.h"
+#endif
 
 #include <assert.h>
 #include <fstream>
@@ -925,6 +928,9 @@ string Section_line::GetPropValue(string const& /* _property*/) const {
 
 #define HELPLINE_SIZE 256
 bool Config::PrintConfig(char const * const configfilename,int everything,bool norem) const {
+#if defined(C_DOSBOX_AGENT)
+    if (dosbox_agent::NativeReplayEnabled()) return false;
+#endif
     char temp[50];
     char helpline[HELPLINE_SIZE] = { 0 };
     //FILE* outfile = fopen(configfilename,"w+t");
@@ -1215,6 +1221,9 @@ Section* Config::GetSectionFromProperty(char const * const prop) const{
 
 
 bool Config::ParseConfigFile(char const * const configfilename) {
+#if defined(C_DOSBOX_AGENT)
+    if (dosbox_agent::NativeReplayEnabled()) return false;
+#endif
     LOG(LOG_MISC,LOG_DEBUG)("CONFIG: Attempting to load config file #%zu from %s",configfiles.size(),configfilename);
 
     //static bool first_configfile = true;
@@ -1293,6 +1302,9 @@ bool Config::ParseConfigFile(char const * const configfilename) {
 }
 
 void Config::ParseEnv(char ** envp) {
+#if defined(C_DOSBOX_AGENT)
+    if (dosbox_agent::NativeReplayEnabled()) return;
+#endif
     for(char** env=envp; *env;env++) {
         char copy[1024];
         safe_strncpy(copy,*env,1024);

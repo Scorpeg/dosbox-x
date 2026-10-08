@@ -1323,19 +1323,19 @@ bool AgentServer::StartFromConfigFile(const std::string& path, std::string* erro
     return Start(config, error);
 }
 
-bool AgentServer::Start(const AgentConfig& config, std::string* error)
+bool AgentServer::Start(const AgentConfig& config, std::string* error, bool in_process)
 {
     const std::shared_ptr<AgentRuntime> runtime(new ProductionAgentRuntime());
     if (!runtime->RequireAvailable(error))
         return false;
 
-    std::unique_ptr<IRpcTransport> transport = AGENT_CreateLocalTransport(config.transport);
-    if (!transport) {
+    std::unique_ptr<IRpcTransport> transport = in_process ? nullptr : AGENT_CreateLocalTransport(config.transport);
+    if (!in_process && !transport) {
         if (error != NULL)
             *error = "No local RPC transport is available";
         return false;
     }
-    if (!transport->ValidateConfiguration(config, error))
+    if (transport && !transport->ValidateConfiguration(config, error))
         return false;
 
     std::string request_path_base;
@@ -1365,7 +1365,7 @@ bool AgentServer::Start(const AgentConfig& config, std::string* error)
 
     if (config.startup_barrier) AGENT_ArmStartupBarrier();
     AGENT_SetInitialRtc(config.initial_rtc_unix_seconds);
-    if (!impl->transport->Start(config, [state](const std::string& request) {
+    if (impl->transport && !impl->transport->Start(config, [state](const std::string& request) {
             return HandleJsonRpcImpl(state, request);
         }, error)) {
         impl->transport.reset();

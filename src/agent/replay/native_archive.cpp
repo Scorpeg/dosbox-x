@@ -1,3 +1,5 @@
+#include "config.h"
+#if defined(C_DOSBOX_AGENT) && C_DEBUG
 #include "agent/native_archive.h"
 #include "agent/exec_observer.h"
 #include <cerrno>
@@ -138,3 +140,4 @@ void NativeArchive::Validate() {
     Rewind();
 }
 }
+#endif
