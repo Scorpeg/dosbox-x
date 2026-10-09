@@ -1,6 +1,9 @@
 
 **Welcome to the DOSBox-X project homepage located on GitHub.**
 
+This fork adds experimental recording and replay verification. See the
+[record/replay quick start](README.record-replay.md) for usage and debugging data.
+
 ## Useful links
 - [DOSBox-X's website](https://dosbox-x.com) ([https://dosbox-x.com](https://dosbox-x.com) or [http://dosbox-x.software](http://dosbox-x.software))  
 - [DOSBox-X's Wiki page](https://dosbox-x.com/wiki)  

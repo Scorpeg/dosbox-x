@@ -1,29 +1,61 @@
-# Native replay archive, experimental v1
+# Native replay format — experimental v1
 
-This is a new native contract, not a reinterpretation of legacy DRINPUT
-recordings. The archive codec alone does not implement game playback.
+Contract: `dosbox-x:native-replay:v1`. Legacy DRINPUT needs its old launcher.
+`dosbox-x --replay-info session.drp` emits JSON lines: `{"kind":…, "data":…}`.
 
-Eight-byte magic: `DRNATV01`. Frames: one ASCII type byte, unsigned little-endian
-32-bit compressed length, a single zlib member, 64 lowercase ASCII SHA-256
-hex characters. Initial chain = SHA256(magic). Each next chain =
-SHA256(previous ASCII digest || five-byte frame prefix || compressed payload).
-This detects corruption; it is not authentication.
+## Layout
 
-Decoded payloads are canonical agent JSON. Maximum decoded header size is 2 MiB;
-other frames 64 KiB. Compressed lengths are bounded by zlib's compressBound of
-that limit. Concatenated members, trailing bytes, duplicate/noncanonical JSON,
-missing footers and repeated headers are rejected. Readers validate the entire
-chain before launch and check it again during streaming. Memory is bounded by a
-frame, not playthrough length. Writers exclusively create a new file and flush
-every frame before acknowledging inputs. Power loss can still lose OS buffers;
-missing/truncated data must fail validation, never become a successful replay.
+File: `DRNATV01` (8 ASCII bytes, once), then frames:
 
-Frame types: H header/config, I input deliveries, X DOS EXEC lifecycle rows,
-O observations, F final completion. H must be first and unique; F last and
-mandatory. The runtime additionally validates semantic order, counts, timeline
-and compatibility. Hashes of memory/raster/audio are retained, not their raw
-bytes. No game files, host directory snapshots or backend executable are stored.
+| Frame offset | Bytes | Encoding |
+| --- | ---: | --- |
+| 0 | 1 | ASCII kind: H/I/X/O/F |
+| 1 | 4 | Compressed length N, unsigned little-endian |
+| 5 | N | One zlib member containing canonical agent JSON |
+| 5+N | 64 | Lowercase ASCII SHA-256 hex chain digest |
 
-The standalone test is `tests/native-replay/archive_test.cpp`; the parent
-harness also checks the wire format independently with Python hashlib/zlib,
-every truncation of a small fixture and malformed canonical/compressed data.
+Chain: `d0 = hex(SHA256(magic))`;
+`dn = hex(SHA256(d_previous + kind/length bytes + compressed payload))`.
+`+` concatenates bytes; digests are lowercase ASCII hex. Detects corruption, not authentication.
+
+## Frames
+
+H is first and unique; F is last and mandatory; I/X/O occur between them.
+
+| Kind | JSON | Contents |
+| --- | --- | --- |
+| H | Object | Compatibility, machine/launch settings, RTC/seed, sample interval, executable identity, entry observation |
+| I | Array | Ordered input deliveries, timing, outcomes |
+| X | Array | DOS EXEC requests/results, entry/exit, overlay addresses, content/relocation hashes |
+| O | Object | Tick, position, exit, domain hashes, input/loader-event counts |
+| F | Object | `end_tick`, `inputs`, `exec_events`, `observations`, `last_observation_sha256` |
+
+## Rules and limits
+
+Decoded H is limited to 2 MiB; other frames to 64 KiB. Compressed length is
+1…`compressBound(decoded_limit)`. Memory is bounded per frame, not recording length.
+
+Readers reject unknown kinds, missing/repeated/misplaced H, missing F, trailing
+data, truncated/oversized/concatenated zlib and invalid/duplicate-key/noncanonical
+JSON. The entire chain is checked before launch and again while streaming;
+runtime checks also cover compatibility, semantic order, timeline, counts and observations.
+
+Writers create files exclusively and flush each frame before acknowledging
+inputs. Completion requires a valid F; flushing does not guarantee power-loss durability.
+
+## Identity and coverage
+
+Only settings, inputs, loader events and state/output hashes are stored—not raw
+RGB/audio/RAM, game files, directory snapshots or the emulator binary.
+
+`target_identity` contains file size and a `file-1mib-block-chain-v1` fingerprint,
+not ordinary `sha256sum`. Preflight checks only the selected EXE/COM; dependencies
+may diverge later. Ordered DOS loads and payload/relocation hashes distinguish
+overlays at reused addresses; custom loaders bypassing DOS EXEC need extra tracing.
+
+Compatibility identifies the emulation/evidence contract, not a host build hash.
+Matching hashes verify captured evidence, not all internal behavior.
+
+Tests: [C++ codec](../tests/native-replay/archive_test.cpp);
+[independent Python hashlib/zlib, truncation and malformed-data checks](../tests/native-replay/test_native_replay.py);
+[record/replay and rejection suite](../tests/native-replay/README.md).
